@@ -217,6 +217,8 @@ class DeformableTransformer(nn.Module):
 
         self.enc_out_class_embed = None
         self.enc_out_bbox_embed = None
+        self.enc_out_center_embed = None
+        self.enc_out_iou_embed = None
 
         # evolution of anchors
         self.dec_layer_number = dec_layer_number
@@ -383,6 +385,7 @@ class DeformableTransformer(nn.Module):
             enc_outputs_coord_unselected = self.enc_out_bbox_embed(
                 output_memory
             ) + output_proposals  # (bs, \sum{hw}, 4) unsigmoid
+
             topk = self.num_queries
             topk_proposals = torch.topk(
                 enc_outputs_class_unselected.max(-1)[0], topk,
@@ -728,6 +731,8 @@ class TransformerDecoder(nn.Module):
             self.query_scale = MLP(d_model, d_model, d_model, 2)
         self.bbox_embed = None
         self.class_embed = None
+        self.center_embed = None
+        self.iou_embed = None
 
         self.d_model = d_model
         self.modulate_hw_attn = modulate_hw_attn

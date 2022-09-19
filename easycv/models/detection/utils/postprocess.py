@@ -12,9 +12,14 @@ from easycv.models.detection.utils import box_cxcywh_to_xyxy
 class DetrPostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
 
-    def __init__(self, num_select=None) -> None:
+    def __init__(self,
+                 num_select=None,
+                 use_centerness=False,
+                 use_iouaware=False) -> None:
         super().__init__()
         self.num_select = num_select
+        self.use_centerness = use_centerness
+        self.use_iouaware = use_iouaware
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes, img_metas):
@@ -35,7 +40,17 @@ class DetrPostProcess(nn.Module):
             scores, labels = prob[..., :-1].max(-1)
             boxes = box_cxcywh_to_xyxy(out_bbox)
         else:
-            prob = out_logits.sigmoid()
+            if self.use_centerness and self.use_iouaware:
+                prob = out_logits.sigmoid(
+                )**0.45 * outputs['pred_centers'].sigmoid(
+                )**0.05 * outputs['pred_ious'].sigmoid()**0.5
+            elif self.use_centerness:
+                prob = out_logits.sigmoid() * outputs['pred_centers'].sigmoid()
+            elif self.use_iouaware:
+                prob = out_logits.sigmoid() * outputs['pred_ious'].sigmoid()
+            else:
+                prob = out_logits.sigmoid()
+
             topk_values, topk_indexes = torch.topk(
                 prob.view(out_logits.shape[0], -1), self.num_select, dim=1)
             scores = topk_values

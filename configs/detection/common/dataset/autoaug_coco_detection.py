@@ -15,7 +15,7 @@ CLASSES = [
 ]
 
 # dataset settings
-data_root = 'data/coco/'
+data_root = '/root/data/coco/'
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 
@@ -130,7 +130,7 @@ data = dict(
     drop_last=True)
 
 # evaluation
-eval_config = dict(interval=1, gpu_collect=False)
+eval_config = dict(initial=True, interval=1, gpu_collect=False)
 eval_pipelines = [
     dict(
         mode='test',
