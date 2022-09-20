@@ -11,4 +11,4 @@ model = dict(
         use_centerness=True,
         use_iouaware=True,
         losses_list=['labels', 'boxes', 'centerness', 'iouaware'],
-        weight_dict=dict(loss_center=2, loss_iouaware=2)))
+        weight_dict=dict(loss_ce=2, loss_center=2, loss_iouaware=2)))
