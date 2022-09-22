@@ -42,6 +42,7 @@ class DeformableTransformer(nn.Module):
         num_patterns=0,
         modulate_hw_attn=False,
         # for deformable encoder
+        multi_encoder_memory=False,
         deformable_encoder=True,
         deformable_decoder=True,
         num_feature_levels=1,
@@ -125,6 +126,10 @@ class DeformableTransformer(nn.Module):
             deformable_encoder=deformable_encoder,
             enc_layer_share=enc_layer_share,
             two_stage_type=two_stage_type)
+        
+        self.multi_encoder_memory = multi_encoder_memory
+        if self.multi_encoder_memory:
+            self.memory_reduce = nn.Linear(d_model * num_encoder_layers, d_model)
 
         # choose decoder layer type
         if deformable_decoder:
@@ -335,7 +340,7 @@ class DeformableTransformer(nn.Module):
         #########################################################
         # Begin Encoder
         #########################################################
-        memory, enc_intermediate_output, enc_intermediate_refpoints = self.encoder(
+        memory_list, enc_intermediate_output, enc_intermediate_refpoints = self.encoder(
             src_flatten,
             pos=lvl_pos_embed_flatten,
             level_start_index=level_start_index,
@@ -345,6 +350,10 @@ class DeformableTransformer(nn.Module):
             ref_token_index=enc_topk_proposals,  # bs, nq
             ref_token_coord=enc_refpoint_embed,  # bs, nq, 4
         )
+        if self.multi_encoder_memory:
+            memory = self.memory_reduce(torch.cat(memory_list, -1))
+        else:
+            memory = memory_list[-1]
         #########################################################
         # End Encoder
         # - memory: bs, \sum{hw}, c
@@ -626,6 +635,7 @@ class TransformerEncoder(nn.Module):
             intermediate_ref.append(ref_token_coord)
 
         # main process
+        outputs = []
         for layer_id, layer in enumerate(self.layers):
             # main process
             dropflag = False
@@ -677,6 +687,8 @@ class TransformerEncoder(nn.Module):
                     ref_token_index.unsqueeze(-1).repeat(1, 1, self.d_model))
                 intermediate_output.append(out_i)
                 intermediate_ref.append(ref_token_coord)
+            
+            outputs.append(output)
 
         if self.norm is not None:
             output = self.norm(output)
@@ -688,7 +700,7 @@ class TransformerEncoder(nn.Module):
         else:
             intermediate_output = intermediate_ref = None
 
-        return output, intermediate_output, intermediate_ref
+        return outputs, intermediate_output, intermediate_ref
 
 
 class TransformerDecoder(nn.Module):
