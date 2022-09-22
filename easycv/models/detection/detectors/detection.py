@@ -62,7 +62,7 @@ class Detection(BaseModel):
             x = self.neck(x)
         return x
 
-    def forward_train(self, imgs, img_metas, gt_bboxes, gt_labels):
+    def forward_train(self, imgs, img_metas, gt_bboxes, gt_labels, gt_masks=None):
         """
         Args:
             img (Tensor): Input images of shape (N, C, H, W).
@@ -88,7 +88,7 @@ class Detection(BaseModel):
             img_metas[i]['batch_input_shape'] = batch_input_shape
 
         x = self.extract_feat(imgs)
-        losses = self.head.forward_train(x, img_metas, gt_bboxes, gt_labels)
+        losses = self.head.forward_train(x, img_metas, gt_bboxes, gt_labels, gt_masks=gt_masks)
         return losses
 
     def forward_test(self, imgs, img_metas):

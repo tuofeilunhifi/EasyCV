@@ -219,6 +219,7 @@ class DeformableTransformer(nn.Module):
         self.enc_out_bbox_embed = None
         self.enc_out_center_embed = None
         self.enc_out_iou_embed = None
+        self.token_embed = None
 
         # evolution of anchors
         self.dec_layer_number = dec_layer_number
@@ -353,6 +354,7 @@ class DeformableTransformer(nn.Module):
         # - enc_intermediate_refpoints: None or (nenc+1, bs, nq, c) or (nenc, bs, nq, c)
         #########################################################
 
+        enc_token_class_unflat = None
         if self.two_stage_type == 'standard':
             if self.two_stage_learn_wh:
                 input_hw = self.two_stage_wh_embedding.weight[0]
@@ -362,6 +364,14 @@ class DeformableTransformer(nn.Module):
                 memory, mask_flatten, spatial_shapes, input_hw)
             output_memory = self.enc_output_norm(
                 self.enc_output(output_memory))
+
+            # token label
+            if self.token_embed is not None:
+                enc_token_class = self.token_embed(output_memory)
+                bs, _, num_classes = enc_token_class.shape
+                enc_token_class_unflat = []
+                for st, (h, w) in zip(level_start_index, spatial_shapes):
+                    enc_token_class_unflat.append(enc_token_class[:, st:st+h*w, :].view(bs, h, w, num_classes))
 
             if self.two_stage_pat_embed > 0:
                 bs, nhw, _ = output_memory.shape
@@ -488,7 +498,7 @@ class DeformableTransformer(nn.Module):
         # ref_enc: (n_enc+1, bs, nq, query_dim) or (1, bs, nq, query_dim) or (n_enc, bs, nq, d_model) or None
         #########################################################
 
-        return hs, references, hs_enc, ref_enc, init_box_proposal
+        return hs, references, hs_enc, ref_enc, init_box_proposal, enc_token_class_unflat
         # hs: (n_dec, bs, nq, d_model)
         # references: sigmoid coordinates. (n_dec+1, bs, bq, 4)
         # hs_enc: (n_enc+1, bs, nq, d_model) or (1, bs, nq, d_model) or None

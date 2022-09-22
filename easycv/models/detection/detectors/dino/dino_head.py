@@ -58,6 +58,7 @@ class DINOHead(nn.Module):
             two_stage_bbox_embed_share=True,
             use_centerness=False,
             use_iouaware=False,
+            use_tokenlabel=False,
             losses_list=['labels', 'boxes'],
             decoder_sa_type='sa',
             temperatureH=20,
@@ -166,9 +167,10 @@ class DINOHead(nn.Module):
         nn.init.constant_(_bbox_embed.layers[-1].weight.data, 0)
         nn.init.constant_(_bbox_embed.layers[-1].bias.data, 0)
 
-        # fcos centerness & iou-aware
+        # fcos centerness & iou-aware & tokenlabel
         self.use_centerness = use_centerness
         self.use_iouaware = use_iouaware
+        self.use_tokenlabel = use_tokenlabel
         if self.use_centerness:
             _center_embed = MLP(embed_dims, embed_dims, 1, 3)
         if self.use_iouaware:
@@ -222,6 +224,12 @@ class DINOHead(nn.Module):
         if self.use_iouaware:
             self.iou_embed = nn.ModuleList(iou_embed_layerlist)
             self.transformer.decoder.iou_embed = self.iou_embed
+        if self.use_tokenlabel:
+            self.token_embed = nn.Linear(embed_dims, self.num_classes)
+            prior_prob = 0.01
+            bias_value = -math.log((1 - prior_prob) / prior_prob)
+            self.token_embed.bias.data = torch.ones(self.num_classes) * bias_value
+            self.transformer.token_embed = self.token_embed
 
         # two stage
         self.two_stage_type = two_stage_type
@@ -382,7 +390,7 @@ class DINOHead(nn.Module):
                 masks.append(mask)
                 poss.append(pos_l)
 
-        hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
+        hs, reference, hs_enc, ref_enc, init_box_proposal, enc_token_class_unflat = self.transformer(
             srcs, masks, query_embed, poss, tgt, attn_mask)
         # In case num object=0
         hs[0] += self.label_enc.weight[0, 0] * 0.0
@@ -458,7 +466,8 @@ class DINOHead(nn.Module):
                 'pred_boxes': interm_coord,
                 'pred_centers': interm_center if self.use_centerness else None,
                 'pred_ious': interm_iou if self.use_iouaware else None,
-                'refpts': init_box_proposal[..., :2]
+                'refpts': init_box_proposal[..., :2],
+                'pred_tokens': enc_token_class_unflat if self.use_tokenlabel else None,
             }
 
         out['dn_meta'] = dn_meta
@@ -490,7 +499,7 @@ class DINOHead(nn.Module):
                   b) in enumerate(zip(outputs_class[:-1], outputs_coord[:-1]))]
 
     # over-write because img_metas are needed as inputs for bbox_head.
-    def forward_train(self, x, img_metas, gt_bboxes, gt_labels):
+    def forward_train(self, x, img_metas, gt_bboxes, gt_labels, gt_masks=None):
         """Forward function for training mode.
         Args:
             x (list[Tensor]): Features from backbone.
@@ -518,8 +527,12 @@ class DINOHead(nn.Module):
             gt_bboxes[i] = box_xyxy_to_cxcywh(gt_bboxes[i]) / factor
 
         targets = []
-        for gt_label, gt_bbox in zip(gt_labels, gt_bboxes):
-            targets.append({'labels': gt_label, 'boxes': gt_bbox})
+        if gt_masks == None:
+            for gt_label, gt_bbox in zip(gt_labels, gt_bboxes):
+                targets.append({'labels': gt_label, 'boxes': gt_bbox})
+        else:
+            for gt_label, gt_bbox, gt_mask in zip(gt_labels, gt_bboxes, gt_masks):
+                targets.append({'labels': gt_label, 'boxes': gt_bbox, 'masks': gt_mask})
 
         query_embed, tgt, attn_mask, dn_meta = self.prepare(
             x, targets=targets, mode='train')

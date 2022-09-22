@@ -8,6 +8,35 @@ from easycv.models.detection.utils import (accuracy, box_cxcywh_to_xyxy,
 from easycv.models.loss.focal_loss import py_sigmoid_focal_loss
 from easycv.models.utils import get_world_size, is_dist_avail_and_initialized
 
+from typing import Optional, List
+from torch import Tensor
+
+class NestedTensor(object):
+    def __init__(self, tensors, mask: Optional[Tensor]):
+        self.tensors = tensors
+        self.mask = mask
+
+    def to(self, device, non_blocking=False):
+        # type: (Device) -> NestedTensor # noqa
+        cast_tensor = self.tensors.to(device, non_blocking=non_blocking)
+        mask = self.mask
+        if mask is not None:
+            assert mask is not None
+            cast_mask = mask.to(device, non_blocking=non_blocking)
+        else:
+            cast_mask = None
+        return NestedTensor(cast_tensor, cast_mask)
+
+    def record_stream(self, *args, **kwargs):
+        self.tensors.record_stream(*args, **kwargs)
+        if self.mask is not None:
+            self.mask.record_stream(*args, **kwargs)
+
+    def decompose(self):
+        return self.tensors, self.mask
+
+    def __repr__(self):
+        return str(self.tensors)
 
 class SetCriterion(nn.Module):
     """ This class computes the loss for Conditional DETR.
@@ -194,6 +223,90 @@ class SetCriterion(nn.Module):
         losses['loss_iouaware'] = loss_iouaware.sum() / num_boxes
         return losses
 
+    def loss_tokens(self, outputs, targets, num_boxes):
+        enc_token_class_unflat = outputs['pred_tokens']
+
+        def _max_by_axis(the_list):
+            # type: (List[List[int]]) -> List[int]
+            maxes = the_list[0]
+            for sublist in the_list[1:]:
+                for index, item in enumerate(sublist):
+                    maxes[index] = max(maxes[index], item)
+            return maxes
+
+        def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
+            # TODO make this more general
+            if tensor_list[0].ndim == 3:
+                # TODO make it support different-sized images
+                max_size = _max_by_axis([list(img.shape) for img in tensor_list])
+                # min_size = tuple(min(s) for s in zip(*[img.shape for img in tensor_list]))
+                batch_shape = [len(tensor_list)] + max_size
+                b, c, h, w = batch_shape
+                dtype = tensor_list[0].dtype
+                device = tensor_list[0].device
+                tensor = torch.zeros(batch_shape, dtype=dtype, device=device)
+                mask = torch.ones((b, h, w), dtype=torch.bool, device=device)
+                for img, pad_img, m in zip(tensor_list, tensor, mask):
+                    pad_img[: img.shape[0], : img.shape[1], : img.shape[2]].copy_(img)
+                    m[: img.shape[1], :img.shape[2]] = False
+            else:
+                raise ValueError('not supported')
+            return NestedTensor(tensor, mask)
+
+        def dice_loss(inputs, targets, num_boxes):
+            """
+            Compute the DICE loss, similar to generalized IOU for masks
+            Args:
+                inputs: A float tensor of arbitrary shape.
+                        The predictions for each example.
+                targets: A float tensor with the same shape as inputs. Stores the binary
+                        classification label for each element in inputs
+                        (0 for the negative class and 1 for the positive class).
+            """
+            inputs = inputs.sigmoid()
+            inputs = inputs.flatten(1)
+            targets = targets.flatten(1)
+            numerator = 2 * (inputs * targets).sum(1)
+            denominator = inputs.sum(-1) + targets.sum(-1)
+            loss = 1 - (numerator + 1) / (denominator + 1)
+            return loss.sum() / num_boxes
+
+        target_masks, valid = nested_tensor_from_tensor_list([t["masks"].to_tensor(dtype=torch.bool, device=enc_token_class_unflat[0].device) for t in targets]).decompose()
+
+        bs, n, h, w = target_masks.shape
+        mask = torch.zeros((bs, h, w), dtype=torch.bool, device=target_masks.device)
+        for j in range(n):
+            target_masks[:, j] &= target_masks[:, j] ^ mask
+            mask |= target_masks[:, j]
+        target_classes_pad = torch.stack([F.pad(t['labels'], (0, n - len(t['labels']))) for t in targets])
+        final_mask = torch.sum(target_masks * target_classes_pad[:, :, None, None], dim=1)  # (bs, h, w)
+        final_mask_onehot = torch.zeros((bs, h, w, self.num_classes), dtype=torch.float32, device=target_masks.device)
+        final_mask_onehot.scatter_(-1, final_mask.unsqueeze(-1), 1)  # (bs, h, w, 80)
+        final_mask_onehot[..., 0] = 1 - final_mask_onehot[..., 0]  # change index 0 from background to foreground
+
+        loss_token_focal = 0
+        loss_token_dice = 0
+        for i, enc_token_class in enumerate(enc_token_class_unflat):
+            _, h, w, _ = enc_token_class.shape
+
+            final_mask_soft = F.adaptive_avg_pool2d(final_mask_onehot.permute(0, 3, 1, 2), (h,w)).permute(0, 2, 3, 1)
+
+            enc_token_class = enc_token_class.flatten(1, 2)
+            final_mask_soft = final_mask_soft.flatten(1, 2)
+            loss_token_focal += py_sigmoid_focal_loss(
+                                    enc_token_class,
+                                    final_mask_soft,
+                                    alpha=0.25,
+                                    gamma=2,
+                                    reduction='none').mean(1).sum() / num_boxes
+            loss_token_dice += dice_loss(enc_token_class, final_mask_soft, num_boxes)
+
+        losses = {
+            'loss_token_focal': loss_token_focal,
+            'loss_token_dice': loss_token_dice,
+        }
+        return losses
+
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat(
@@ -306,6 +419,14 @@ class SetCriterion(nn.Module):
                     for k, v in l_dict.items()
                 }
                 losses.update(l_dict)
+            if 'pred_tokens' in interm_outputs and interm_outputs['pred_tokens'] is not None:
+                l_dict = self.loss_tokens(interm_outputs, targets, num_boxes)
+                l_dict = {
+                    k + '_interm':
+                    v * (self.weight_dict[k] if k in self.weight_dict else 1.0)
+                    for k, v in l_dict.items()
+                }
+                losses.update(l_dict)
 
         if return_indices:
             indices_list.append(indices0_copy)
@@ -395,7 +516,7 @@ class CDNCriterion(SetCriterion):
                 l_dict['loss_bbox_dn'] = torch.as_tensor(0.).to('cuda')
                 l_dict['loss_giou_dn'] = torch.as_tensor(0.).to('cuda')
             if 'centerness' in self.losses:
-                l_dict['loss_centerness_dn'] = torch.as_tensor(0.).to('cuda')
+                l_dict['loss_center_dn'] = torch.as_tensor(0.).to('cuda')
             if 'iouaware' in self.losses:
                 l_dict['loss_iouaware_dn'] = torch.as_tensor(0.).to('cuda')
             losses.update(l_dict)
@@ -428,7 +549,7 @@ class CDNCriterion(SetCriterion):
                     l_dict['loss_bbox_dn'] = torch.as_tensor(0.).to('cuda')
                     l_dict['loss_giou_dn'] = torch.as_tensor(0.).to('cuda')
                 if 'centerness' in self.losses:
-                    l_dict['loss_centerness_dn'] = torch.as_tensor(0.).to(
+                    l_dict['loss_center_dn'] = torch.as_tensor(0.).to(
                         'cuda')
                 if 'iouaware' in self.losses:
                     l_dict['loss_iouaware_dn'] = torch.as_tensor(0.).to('cuda')
