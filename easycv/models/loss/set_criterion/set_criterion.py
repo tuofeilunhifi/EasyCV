@@ -8,8 +8,217 @@ from easycv.models.detection.utils import (accuracy, box_cxcywh_to_xyxy,
 from easycv.models.loss.focal_loss import py_sigmoid_focal_loss
 from easycv.models.utils import get_world_size, is_dist_avail_and_initialized
 
-from typing import Optional, List
+from typing import Optional, List, Union, Any
 from torch import Tensor
+
+from torchvision.ops import roi_align
+import numpy as np
+import cv2
+
+
+# NOTE: torchvision's RoIAlign has a different default aligned=False
+class ROIAlign(nn.Module):
+    def __init__(self, output_size, spatial_scale, sampling_ratio, aligned=True):
+        """
+        Args:
+            output_size (tuple): h, w
+            spatial_scale (float): scale the input boxes by this number
+            sampling_ratio (int): number of inputs samples to take for each output
+                sample. 0 to take samples densely.
+            aligned (bool): if False, use the legacy implementation in
+                Detectron. If True, align the results more perfectly.
+
+        Note:
+            The meaning of aligned=True:
+
+            Given a continuous coordinate c, its two neighboring pixel indices (in our
+            pixel model) are computed by floor(c - 0.5) and ceil(c - 0.5). For example,
+            c=1.3 has pixel neighbors with discrete indices [0] and [1] (which are sampled
+            from the underlying signal at continuous coordinates 0.5 and 1.5). But the original
+            roi_align (aligned=False) does not subtract the 0.5 when computing neighboring
+            pixel indices and therefore it uses pixels with a slightly incorrect alignment
+            (relative to our pixel model) when performing bilinear interpolation.
+
+            With `aligned=True`,
+            we first appropriately scale the ROI and then shift it by -0.5
+            prior to calling roi_align. This produces the correct neighbors; see
+            detectron2/tests/test_roi_align.py for verification.
+
+            The difference does not make a difference to the model's performance if
+            ROIAlign is used together with conv layers.
+        """
+        super().__init__()
+        self.output_size = output_size
+        self.spatial_scale = spatial_scale
+        self.sampling_ratio = sampling_ratio
+        self.aligned = aligned
+
+        from torchvision import __version__
+
+        version = tuple(int(x) for x in __version__.split(".")[:2])
+        # https://github.com/pytorch/vision/pull/2438
+        #assert version >= (0, 7), "Require torchvision >= 0.7"
+
+    def forward(self, input, rois):
+        """
+        Args:
+            input: NCHW images
+            rois: Bx5 boxes. First column is the index into N. The other 4 columns are xyxy.
+        """
+        assert rois.dim() == 2 and rois.size(1) == 5
+        if input.is_quantized:
+            input = input.dequantize()
+        return roi_align(
+            input,
+            rois.to(dtype=input.dtype),
+            self.output_size,
+            self.spatial_scale,
+            self.sampling_ratio,
+            self.aligned,
+        )
+
+    def __repr__(self):
+        tmpstr = self.__class__.__name__ + "("
+        tmpstr += "output_size=" + str(self.output_size)
+        tmpstr += ", spatial_scale=" + str(self.spatial_scale)
+        tmpstr += ", sampling_ratio=" + str(self.sampling_ratio)
+        tmpstr += ", aligned=" + str(self.aligned)
+        tmpstr += ")"
+        return tmpstr
+
+class BitMasks:
+    """
+    This class stores the segmentation masks for all objects in one image, in
+    the form of bitmaps.
+
+    Attributes:
+        tensor: bool Tensor of N,H,W, representing N instances in the image.
+    """
+
+    def __init__(self, tensor: Union[torch.Tensor, np.ndarray]):
+        """
+        Args:
+            tensor: bool Tensor of N,H,W, representing N instances in the image.
+        """
+        device = tensor.device if isinstance(tensor, torch.Tensor) else torch.device("cpu")
+        tensor = torch.as_tensor(tensor, dtype=torch.bool, device=device)
+        assert tensor.dim() == 3, tensor.size()
+        self.image_size = tensor.shape[1:]
+        self.tensor = tensor
+
+    @torch.jit.unused
+    def to(self, *args: Any, **kwargs: Any) -> "BitMasks":
+        return BitMasks(self.tensor.to(*args, **kwargs))
+
+    @property
+    def device(self) -> torch.device:
+        return self.tensor.device
+
+    @torch.jit.unused
+    def __getitem__(self, item: Union[int, slice, torch.BoolTensor]) -> "BitMasks":
+        """
+        Returns:
+            BitMasks: Create a new :class:`BitMasks` by indexing.
+
+        The following usage are allowed:
+
+        1. `new_masks = masks[3]`: return a `BitMasks` which contains only one mask.
+        2. `new_masks = masks[2:10]`: return a slice of masks.
+        3. `new_masks = masks[vector]`, where vector is a torch.BoolTensor
+           with `length = len(masks)`. Nonzero elements in the vector will be selected.
+
+        Note that the returned object might share storage with this object,
+        subject to Pytorch's indexing semantics.
+        """
+        if isinstance(item, int):
+            return BitMasks(self.tensor[item].unsqueeze(0))
+        m = self.tensor[item]
+        assert m.dim() == 3, "Indexing on BitMasks with {} returns a tensor with shape {}!".format(
+            item, m.shape
+        )
+        return BitMasks(m)
+
+    @torch.jit.unused
+    def __iter__(self) -> torch.Tensor:
+        yield from self.tensor
+
+    @torch.jit.unused
+    def __repr__(self) -> str:
+        s = self.__class__.__name__ + "("
+        s += "num_instances={})".format(len(self.tensor))
+        return s
+
+    def __len__(self) -> int:
+        return self.tensor.shape[0]
+
+    def nonempty(self) -> torch.Tensor:
+        """
+        Find masks that are non-empty.
+
+        Returns:
+            Tensor: a BoolTensor which represents
+                whether each mask is empty (False) or non-empty (True).
+        """
+        return self.tensor.flatten(1).any(dim=1)
+
+    @staticmethod
+    def from_polygon_masks(
+        polygon_masks: Union["PolygonMasks", List[List[np.ndarray]]], height: int, width: int
+    ) -> "BitMasks":
+        """
+        Args:
+            polygon_masks (list[list[ndarray]] or PolygonMasks)
+            height, width (int)
+        """
+        if isinstance(polygon_masks, PolygonMasks):
+            polygon_masks = polygon_masks.polygons
+        masks = [polygons_to_bitmask(p, height, width) for p in polygon_masks]
+        if len(masks):
+            return BitMasks(torch.stack([torch.from_numpy(x) for x in masks]))
+        else:
+            return BitMasks(torch.empty(0, height, width, dtype=torch.bool))
+
+    @staticmethod
+    def from_roi_masks(roi_masks: "ROIMasks", height: int, width: int) -> "BitMasks":
+        """
+        Args:
+            roi_masks:
+            height, width (int):
+        """
+        return roi_masks.to_bitmasks(height, width)
+
+    def crop_and_resize(self, boxes: torch.Tensor, mask_size: int) -> torch.Tensor:
+        """
+        Crop each bitmask by the given box, and resize results to (mask_size, mask_size).
+        This can be used to prepare training targets for Mask R-CNN.
+        It has less reconstruction error compared to rasterization with polygons.
+        However we observe no difference in accuracy,
+        but BitMasks requires more memory to store all the masks.
+
+        Args:
+            boxes (Tensor): Nx4 tensor storing the boxes for each mask
+            mask_size (int): the size of the rasterized mask.
+
+        Returns:
+            Tensor:
+                A bool tensor of shape (N, mask_size, mask_size), where
+                N is the number of predicted boxes for this image.
+        """
+        assert len(boxes) == len(self), "{} != {}".format(len(boxes), len(self))
+        device = self.tensor.device
+
+        batch_inds = torch.arange(len(boxes), device=device).to(dtype=boxes.dtype)[:, None]
+        rois = torch.cat([batch_inds, boxes], dim=1)  # Nx5
+
+        bit_masks = self.tensor.to(dtype=torch.float32)
+        rois = rois.to(device=device)
+        output = (
+            ROIAlign((mask_size, mask_size), 1.0, 0, aligned=True)
+            .forward(bit_masks[:, None, :, :], rois)
+            .squeeze(1)
+        )
+        output = output >= 0.5
+        return output
 
 class NestedTensor(object):
     def __init__(self, tensors, mask: Optional[Tensor]):
@@ -38,6 +247,33 @@ class NestedTensor(object):
     def __repr__(self):
         return str(self.tensors)
 
+def _max_by_axis(the_list):
+    # type: (List[List[int]]) -> List[int]
+    maxes = the_list[0]
+    for sublist in the_list[1:]:
+        for index, item in enumerate(sublist):
+            maxes[index] = max(maxes[index], item)
+    return maxes
+
+def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
+    # TODO make this more general
+    if tensor_list[0].ndim == 3:
+        # TODO make it support different-sized images
+        max_size = _max_by_axis([list(img.shape) for img in tensor_list])
+        # min_size = tuple(min(s) for s in zip(*[img.shape for img in tensor_list]))
+        batch_shape = [len(tensor_list)] + max_size
+        b, c, h, w = batch_shape
+        dtype = tensor_list[0].dtype
+        device = tensor_list[0].device
+        tensor = torch.zeros(batch_shape, dtype=dtype, device=device)
+        mask = torch.ones((b, h, w), dtype=torch.bool, device=device)
+        for img, pad_img, m in zip(tensor_list, tensor, mask):
+            pad_img[: img.shape[0], : img.shape[1], : img.shape[2]].copy_(img)
+            m[: img.shape[1], :img.shape[2]] = False
+    else:
+        raise ValueError('not supported')
+    return NestedTensor(tensor, mask)
+
 class SetCriterion(nn.Module):
     """ This class computes the loss for Conditional DETR.
     The process happens in two steps:
@@ -51,7 +287,8 @@ class SetCriterion(nn.Module):
                  weight_dict,
                  losses,
                  eos_coef=None,
-                 loss_class_type='ce'):
+                 loss_class_type='ce',
+                 processor_dct=None):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -65,6 +302,7 @@ class SetCriterion(nn.Module):
         self.weight_dict = weight_dict
         self.losses = losses
         self.loss_class_type = loss_class_type
+        self.processor_dct = processor_dct
         if self.loss_class_type == 'ce':
             empty_weight = torch.ones(self.num_classes + 1)
             empty_weight[-1] = eos_coef
@@ -156,6 +394,55 @@ class SetCriterion(nn.Module):
 
         return losses
 
+    def loss_masks(self, outputs, targets, indices, num_boxes):
+        """Compute the losses related to the masks: the focal loss and the dice loss.
+           targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
+        """
+        assert "pred_vectors" in outputs
+
+        src_idx = self._get_src_permutation_idx(indices)
+        tgt_idx = self._get_tgt_permutation_idx(indices)
+
+        src_masks = outputs["pred_vectors"]
+        src_boxes = outputs['pred_boxes']
+
+        # TODO use valid to mask invalid areas due to padding in loss
+        target_boxes = torch.cat([t['xyxy_boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        target_masks, valid = nested_tensor_from_tensor_list([t["masks"].to_tensor(dtype=torch.bool, device=src_masks.device) for t in targets]).decompose()
+        target_masks = target_masks.to(src_masks)
+        src_vectors = src_masks[src_idx]
+        src_boxes = src_boxes[src_idx]
+        target_masks = target_masks[tgt_idx]
+
+        # crop gt_masks
+        n_keep, gt_mask_len = self.processor_dct.n_keep, self.processor_dct.gt_mask_len
+        gt_masks = BitMasks(target_masks)
+        gt_masks = gt_masks.crop_and_resize(target_boxes, gt_mask_len).to(device=src_masks.device).float()
+        target_masks = gt_masks
+
+        if target_masks.shape[0] == 0:
+            losses = {
+                "loss_vector": src_vectors.sum() * 0
+            }
+            return losses
+
+        # perform dct transform
+        target_vectors = []
+        for i in range(target_masks.shape[0]):
+            gt_mask_i = ((target_masks[i,:,:] >= 0.5)* 1).to(dtype=torch.uint8)
+            gt_mask_i = gt_mask_i.cpu().numpy().astype(np.float32)
+            coeffs = cv2.dct(gt_mask_i)
+            coeffs = torch.from_numpy(coeffs).flatten()
+            coeffs = coeffs[torch.tensor(self.processor_dct.zigzag_table)]
+            gt_label = coeffs.unsqueeze(0)
+            target_vectors.append(gt_label)
+
+        target_vectors = torch.cat(target_vectors, dim=0).to(device=src_vectors.device)
+        losses = {}
+        losses['loss_vector'] = F.l1_loss(src_vectors, target_vectors, reduction='mean')
+
+        return losses
+
     def loss_centerness(self, outputs, targets, indices, num_boxes):
 
         def ref2ltrb(ref, xyxy):
@@ -225,33 +512,6 @@ class SetCriterion(nn.Module):
 
     def loss_tokens(self, outputs, targets, num_boxes):
         enc_token_class_unflat = outputs['pred_tokens']
-
-        def _max_by_axis(the_list):
-            # type: (List[List[int]]) -> List[int]
-            maxes = the_list[0]
-            for sublist in the_list[1:]:
-                for index, item in enumerate(sublist):
-                    maxes[index] = max(maxes[index], item)
-            return maxes
-
-        def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
-            # TODO make this more general
-            if tensor_list[0].ndim == 3:
-                # TODO make it support different-sized images
-                max_size = _max_by_axis([list(img.shape) for img in tensor_list])
-                # min_size = tuple(min(s) for s in zip(*[img.shape for img in tensor_list]))
-                batch_shape = [len(tensor_list)] + max_size
-                b, c, h, w = batch_shape
-                dtype = tensor_list[0].dtype
-                device = tensor_list[0].device
-                tensor = torch.zeros(batch_shape, dtype=dtype, device=device)
-                mask = torch.ones((b, h, w), dtype=torch.bool, device=device)
-                for img, pad_img, m in zip(tensor_list, tensor, mask):
-                    pad_img[: img.shape[0], : img.shape[1], : img.shape[2]].copy_(img)
-                    m[: img.shape[1], :img.shape[2]] = False
-            else:
-                raise ValueError('not supported')
-            return NestedTensor(tensor, mask)
 
         def dice_loss(inputs, targets, num_boxes):
             """
@@ -326,6 +586,7 @@ class SetCriterion(nn.Module):
             'labels': self.loss_labels,
             'cardinality': self.loss_cardinality,
             'boxes': self.loss_boxes,
+            'masks': self.loss_masks,
             'centerness': self.loss_centerness,
             'iouaware': self.loss_iouaware,
         }
@@ -381,9 +642,9 @@ class SetCriterion(nn.Module):
                 if return_indices:
                     indices_list.append(indices)
                 for loss in self.losses:
-                    if loss == 'masks':
-                        # Intermediate masks losses are too costly to compute, we ignore them.
-                        continue
+                    # if loss == 'masks':
+                    #     # Intermediate masks losses are too costly to compute, we ignore them.
+                    #     continue
                     kwargs = {}
                     if loss == 'labels':
                         # Logging is enabled only for the last layer
@@ -448,14 +709,16 @@ class CDNCriterion(SetCriterion):
                  weight_dict,
                  losses,
                  eos_coef=None,
-                 loss_class_type='ce'):
+                 loss_class_type='ce',
+                 processor_dct=None):
         super().__init__(
             num_classes=num_classes,
             matcher=matcher,
             weight_dict=weight_dict,
             losses=losses,
             eos_coef=eos_coef,
-            loss_class_type=loss_class_type)
+            loss_class_type=loss_class_type,
+            processor_dct=processor_dct)
 
     def prep_for_dn(self, dn_meta):
         output_known_lbs_bboxes = dn_meta['output_known_lbs_bboxes']
@@ -519,6 +782,8 @@ class CDNCriterion(SetCriterion):
                 l_dict['loss_center_dn'] = torch.as_tensor(0.).to('cuda')
             if 'iouaware' in self.losses:
                 l_dict['loss_iouaware_dn'] = torch.as_tensor(0.).to('cuda')
+            if 'masks' in self.losses:
+                l_dict['loss_vector_dn'] = torch.as_tensor(0.).to('cuda')
             losses.update(l_dict)
 
         for i in range(aux_num):
@@ -553,6 +818,8 @@ class CDNCriterion(SetCriterion):
                         'cuda')
                 if 'iouaware' in self.losses:
                     l_dict['loss_iouaware_dn'] = torch.as_tensor(0.).to('cuda')
+                if 'masks' in self.losses:
+                    l_dict['loss_vector_dn'] = torch.as_tensor(0.).to('cuda')
                 l_dict = {
                     k + f'_{i}':
                     v * (self.weight_dict[k] if k in self.weight_dict else 1.0)

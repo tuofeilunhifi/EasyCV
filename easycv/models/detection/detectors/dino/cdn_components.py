@@ -155,7 +155,8 @@ def cdn_post_process(outputs_class,
                      _set_aux_loss,
                      outputs_center=None,
                      outputs_iou=None,
-                     reference=None):
+                     reference=None,
+                     outputs_vector=None):
     """
         post process of dn after output from the transformer
         put the dn part in the dn_meta
@@ -167,12 +168,16 @@ def cdn_post_process(outputs_class,
         outputs_coord = outputs_coord[:, :, dn_meta['pad_size']:, :]
         output_known_center = None
         output_known_iou = None
+        output_known_vector = None
         if outputs_center is not None:
             output_known_center = outputs_center[:, :, :dn_meta['pad_size'], :]
             outputs_center = outputs_center[:, :, dn_meta['pad_size']:, :]
         if outputs_iou is not None:
             output_known_iou = outputs_iou[:, :, :dn_meta['pad_size'], :]
             outputs_iou = outputs_iou[:, :, dn_meta['pad_size']:, :]
+        if outputs_vector is not None:
+            output_known_vector = outputs_vector[:, :, :dn_meta['pad_size'], :]
+            outputs_vector = outputs_vector[:, :, dn_meta['pad_size']:, :]
         known_reference = reference[:, :, :dn_meta['pad_size'], :]
         reference = reference[:, :, dn_meta['pad_size']:, :]
         out = {
@@ -186,11 +191,12 @@ def cdn_post_process(outputs_class,
             'pred_ious':
             output_known_iou[-1] if output_known_iou is not None else None,
             'refpts':
-            known_reference[-1]
+            known_reference[-1],
+            'pred_vectors': output_known_vector[-1] if output_known_vector is not None else None
         }
         out['aux_outputs'] = _set_aux_loss(output_known_class,
                                            output_known_coord,
                                            output_known_center,
-                                           output_known_iou, known_reference)
+                                           output_known_iou, known_reference, output_known_vector)
         dn_meta['output_known_lbs_bboxes'] = out
-    return outputs_class, outputs_coord, outputs_center, outputs_iou, reference
+    return outputs_class, outputs_coord, outputs_center, outputs_iou, reference, outputs_vector

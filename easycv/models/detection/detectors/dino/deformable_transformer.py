@@ -225,6 +225,7 @@ class DeformableTransformer(nn.Module):
         self.enc_out_center_embed = None
         self.enc_out_iou_embed = None
         self.token_embed = None
+        self.enc_out_vector_embed = None
 
         # evolution of anchors
         self.dec_layer_number = dec_layer_number

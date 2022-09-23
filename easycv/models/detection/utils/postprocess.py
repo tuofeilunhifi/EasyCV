@@ -1,5 +1,6 @@
 from distutils.version import LooseVersion
 
+import cv2
 import numpy as np
 import torch
 import torch.nn as nn
@@ -8,6 +9,8 @@ import torchvision
 
 from easycv.models.detection.utils import box_cxcywh_to_xyxy
 
+from .dct_utils import retry_if_cuda_oom, paste_masks_in_image
+
 
 class DetrPostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
@@ -15,11 +18,13 @@ class DetrPostProcess(nn.Module):
     def __init__(self,
                  num_select=None,
                  use_centerness=False,
-                 use_iouaware=False) -> None:
+                 use_iouaware=False,
+                 processor_dct=None) -> None:
         super().__init__()
         self.num_select = num_select
         self.use_centerness = use_centerness
         self.use_iouaware = use_iouaware
+        self.processor_dct = processor_dct
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes, img_metas):
@@ -30,7 +35,10 @@ class DetrPostProcess(nn.Module):
                           For evaluation, this must be the original image size (before any data augmentation)
                           For visualization, this should be the image size after data augment, but before padding
         """
-        out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
+        if self.processor_dct is not None:
+            out_logits, out_bbox, out_vector = outputs['pred_logits'], outputs['pred_boxes'], outputs['pred_vectors']
+        else:
+            out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
 
         assert len(out_logits) == len(target_sizes)
         assert target_sizes.shape[1] == 2
@@ -39,6 +47,12 @@ class DetrPostProcess(nn.Module):
             prob = F.softmax(out_logits, -1)
             scores, labels = prob[..., :-1].max(-1)
             boxes = box_cxcywh_to_xyxy(out_bbox)
+            
+            # and from relative [0, 1] to absolute [0, height] coordinates
+            img_h, img_w = target_sizes.unbind(1)
+            scale_fct = torch.stack([img_w, img_h, img_w, img_h],
+                                    dim=1).to(boxes.device)
+            boxes = boxes * scale_fct[:, None, :]
         else:
             if self.use_centerness and self.use_iouaware:
                 prob = out_logits.sigmoid(
@@ -60,18 +74,59 @@ class DetrPostProcess(nn.Module):
             boxes = torch.gather(boxes, 1,
                                  topk_boxes.unsqueeze(-1).repeat(1, 1, 4))
 
-        # and from relative [0, 1] to absolute [0, height] coordinates
-        img_h, img_w = target_sizes.unbind(1)
-        scale_fct = torch.stack([img_w, img_h, img_w, img_h],
-                                dim=1).to(boxes.device)
-        boxes = boxes * scale_fct[:, None, :]
+            # and from relative [0, 1] to absolute [0, height] coordinates
+            img_h, img_w = target_sizes.unbind(1)
+            scale_fct = torch.stack([img_w, img_h, img_w, img_h],
+                                    dim=1).to(boxes.device)
+            boxes = boxes * scale_fct[:, None, :]
 
-        results = {
-            'detection_boxes': [boxes[0].cpu().numpy()],
-            'detection_scores': [scores[0].cpu().numpy()],
-            'detection_classes': [labels[0].cpu().numpy().astype(np.int32)],
-            'img_metas': img_metas
-        }
+            # Added for Instance Segmentation
+            if self.processor_dct is not None:
+                n_keep = self.processor_dct.n_keep
+                vectors = torch.gather(out_vector, 1, topk_boxes.unsqueeze(-1).repeat(1, 1, n_keep))
+                masks = []
+                n_keep, gt_mask_len = self.processor_dct.n_keep, self.processor_dct.gt_mask_len
+                b, r, c = vectors.shape
+                for bi in range(b):
+                    outputs_masks_per_image = []
+                    for ri in range(r):
+                        # here visual for training
+                        idct = np.zeros((gt_mask_len ** 2))
+                        idct[:n_keep] = vectors[bi, ri].cpu().numpy()
+                        idct = self.processor_dct.inverse_zigzag(idct, gt_mask_len, gt_mask_len)
+                        re_mask = cv2.idct(idct)
+                        max_v = np.max(re_mask)
+                        min_v = np.min(re_mask)
+                        re_mask = np.where(re_mask > (max_v + min_v) / 2., 1, 0)
+                        re_mask = torch.from_numpy(re_mask)[None].float()
+                        outputs_masks_per_image.append(re_mask)
+                    outputs_masks_per_image = torch.cat(outputs_masks_per_image, dim=0).to(out_vector.device)
+                    # here padding local mask to global mask
+                    outputs_masks_per_image = retry_if_cuda_oom(paste_masks_in_image)(
+                    outputs_masks_per_image,  # N, 1, M, M
+                    boxes[bi],
+                    (img_h[bi], img_w[bi]),
+                    threshold=0.5,
+                    )
+                    outputs_masks_per_image = outputs_masks_per_image.unsqueeze(1).cpu()
+                    masks.append(outputs_masks_per_image)
+            ###########
+
+        if self.processor_dct is None:
+            results = {
+                'detection_boxes': [boxes[0].cpu().numpy()],
+                'detection_scores': [scores[0].cpu().numpy()],
+                'detection_classes': [labels[0].cpu().numpy().astype(np.int32)],
+                'img_metas': img_metas
+            }
+        else:
+            results = {
+                'detection_boxes': [boxes[0].cpu().numpy()],
+                'detection_scores': [scores[0].cpu().numpy()],
+                'detection_classes': [labels[0].cpu().numpy().astype(np.int32)],
+                'detection_masks': [masks[0].cpu().numpy()],
+                'img_metas': img_metas
+            }
 
         return results
 
