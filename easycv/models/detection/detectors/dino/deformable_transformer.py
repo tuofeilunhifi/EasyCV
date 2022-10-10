@@ -20,6 +20,7 @@ from easycv.models.detection.utils import (gen_encoder_output_proposals,
                                            gen_sineembed_for_position,
                                            inverse_sigmoid)
 from easycv.models.utils import MLP, _get_activation_fn, _get_clones
+from .lvc import LVCBlock
 
 
 @NECKS.register_module
@@ -43,6 +44,7 @@ class DeformableTransformer(nn.Module):
         modulate_hw_attn=False,
         # for deformable encoder
         multi_encoder_memory=False,
+        use_lvc=False,
         deformable_encoder=True,
         deformable_decoder=True,
         num_feature_levels=1,
@@ -129,7 +131,13 @@ class DeformableTransformer(nn.Module):
         
         self.multi_encoder_memory = multi_encoder_memory
         if self.multi_encoder_memory:
-            self.memory_reduce = nn.Linear(d_model * num_encoder_layers, d_model)
+            self.memory_reduce = nn.Linear(d_model * 2, d_model)
+            # self.memory_reduce = MLP(d_model * 2, d_model, d_model, 2)
+
+        self.use_lvc = use_lvc
+        if self.use_lvc:
+            self.memory_reduce = nn.Linear(d_model * 2, d_model)
+            self.lvc = LVCBlock(in_channels=d_model, out_channels=d_model, num_codes=64)
 
         # choose decoder layer type
         if deformable_decoder:
@@ -352,9 +360,15 @@ class DeformableTransformer(nn.Module):
             ref_token_coord=enc_refpoint_embed,  # bs, nq, 4
         )
         if self.multi_encoder_memory:
-            memory = self.memory_reduce(torch.cat(memory_list, -1))
+            memory = self.memory_reduce(torch.cat([src_flatten, memory_list[-1]], -1))
         else:
-            memory = memory_list[-1]
+            if self.use_lvc:
+                lvc_flatten = [self.lvc(src).flatten(2).transpose(1, 2) for src in srcs]
+                lvc_flatten = torch.cat(lvc_flatten, 1)
+                memory = torch.cat([lvc_flatten, memory_list[-1]], dim=2)
+                memory = self.memory_reduce(memory)
+            else:
+                memory = memory_list[-1]
         #########################################################
         # End Encoder
         # - memory: bs, \sum{hw}, c
