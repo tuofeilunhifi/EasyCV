@@ -21,6 +21,7 @@ from easycv.models.detection.utils import (gen_encoder_output_proposals,
                                            inverse_sigmoid)
 from easycv.models.utils import MLP, _get_activation_fn, _get_clones
 from .lvc import LVCBlock
+import torch.nn.functional as F
 
 
 @NECKS.register_module
@@ -363,9 +364,15 @@ class DeformableTransformer(nn.Module):
             memory = self.memory_reduce(torch.cat([src_flatten, memory_list[-1]], -1))
         else:
             if self.use_lvc:
-                lvc_flatten = [self.lvc(src).flatten(2).transpose(1, 2) for src in srcs]
+                lvc_flatten = []
+                for i, src in enumerate(srcs[::-1]):
+                    if i == 0:
+                        lvc_flatten.append(self.lvc(src))
+                    else:
+                        lvc_flatten.append(F.interpolate(lvc_flatten[0], size=src.shape[2:], mode='nearest'))
+                lvc_flatten = [lvc.flatten(2).transpose(1, 2) for lvc in lvc_flatten]
                 lvc_flatten = torch.cat(lvc_flatten, 1)
-                memory = torch.cat([lvc_flatten, memory_list[-1]], dim=2)
+                memory = torch.cat([lvc_flatten, memory_list[-1]], -1)
                 memory = self.memory_reduce(memory)
             else:
                 memory = memory_list[-1]
