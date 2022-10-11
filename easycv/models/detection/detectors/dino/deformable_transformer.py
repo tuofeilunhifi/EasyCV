@@ -366,10 +366,10 @@ class DeformableTransformer(nn.Module):
             if self.use_lvc:
                 lvc_flatten = []
                 for i, src in enumerate(srcs[::-1]):
-                    if i == 0:
+                    if i <= 3:
                         lvc_flatten.append(self.lvc(src))
                     else:
-                        lvc_flatten.append(F.interpolate(lvc_flatten[0], size=src.shape[2:], mode='nearest'))
+                        lvc_flatten.append(F.interpolate(lvc_flatten[-1], size=src.shape[2:], mode='nearest'))
                 lvc_flatten = [lvc.flatten(2).transpose(1, 2) for lvc in lvc_flatten[::-1]]
                 lvc_flatten = torch.cat(lvc_flatten, 1)
                 memory = torch.cat([lvc_flatten, memory_list[-1]], -1)
