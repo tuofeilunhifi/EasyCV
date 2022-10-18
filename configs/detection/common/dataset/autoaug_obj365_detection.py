@@ -113,7 +113,7 @@ train_pipeline = [
     dict(type='DefaultFormatBundle'),
     dict(
         type='Collect',
-        keys=['img', 'gt_bboxes', 'gt_labels', 'gt_masks'],
+        keys=['img', 'gt_bboxes', 'gt_labels'],
         meta_keys=('filename', 'ori_filename', 'ori_shape', 'ori_img_shape',
                    'img_shape', 'pad_shape', 'scale_factor', 'flip',
                    'flip_direction', 'img_norm_cfg'))
@@ -147,11 +147,7 @@ train_dataset = dict(
         img_prefix=data_root + 'train/',
         pipeline=[
             dict(type='LoadImageFromFile'),
-            dict(
-                type='LoadAnnotations',
-                with_bbox=True,
-                with_mask=True,
-                poly2mask=False)
+            dict(type='LoadAnnotations', with_bbox=True)
         ],
         classes=CLASSES,
         test_mode=False,
@@ -163,7 +159,7 @@ val_dataset = dict(
     type='DetDataset',
     imgs_per_gpu=1,
     data_source=dict(
-        type='DetSourceCoco',
+        type='DetSourceObjects365',
         ann_file=data_root + 'annotations/zhiyuan_objv2_val.json',
         img_prefix=data_root + 'val/',
         pipeline=[
@@ -184,7 +180,7 @@ data = dict(
     drop_last=True)
 
 # evaluation
-eval_config = dict(initial=True, interval=1, gpu_collect=False)
+eval_config = dict(initial=False, interval=1, gpu_collect=False)
 eval_pipelines = [
     dict(
         mode='test',

@@ -13,6 +13,7 @@ import random
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from easycv.models.builder import NECKS
@@ -21,7 +22,6 @@ from easycv.models.detection.utils import (gen_encoder_output_proposals,
                                            inverse_sigmoid)
 from easycv.models.utils import MLP, _get_activation_fn, _get_clones
 from .lvc import LVCBlock
-import torch.nn.functional as F
 
 
 @NECKS.register_module
@@ -129,16 +129,16 @@ class DeformableTransformer(nn.Module):
             deformable_encoder=deformable_encoder,
             enc_layer_share=enc_layer_share,
             two_stage_type=two_stage_type)
-        
+
         self.multi_encoder_memory = multi_encoder_memory
         if self.multi_encoder_memory:
             self.memory_reduce = nn.Linear(d_model * 2, d_model)
-            # self.memory_reduce = MLP(d_model * 2, d_model, d_model, 2)
 
         self.use_lvc = use_lvc
         if self.use_lvc:
             self.memory_reduce = nn.Linear(d_model * 2, d_model)
-            self.lvc = LVCBlock(in_channels=d_model, out_channels=d_model, num_codes=64)
+            self.lvc = LVCBlock(
+                in_channels=d_model, out_channels=d_model, num_codes=64)
 
         # choose decoder layer type
         if deformable_decoder:
@@ -361,7 +361,8 @@ class DeformableTransformer(nn.Module):
             ref_token_coord=enc_refpoint_embed,  # bs, nq, 4
         )
         if self.multi_encoder_memory:
-            memory = self.memory_reduce(torch.cat([src_flatten, memory_list[-1]], -1))
+            memory = self.memory_reduce(
+                torch.cat([src_flatten, memory_list[-1]], -1))
         else:
             if self.use_lvc:
                 lvc_flatten = []
@@ -369,8 +370,14 @@ class DeformableTransformer(nn.Module):
                     if i <= 3:
                         lvc_flatten.append(self.lvc(src))
                     else:
-                        lvc_flatten.append(F.interpolate(lvc_flatten[-1], size=src.shape[2:], mode='nearest'))
-                lvc_flatten = [lvc.flatten(2).transpose(1, 2) for lvc in lvc_flatten[::-1]]
+                        lvc_flatten.append(
+                            F.interpolate(
+                                lvc_flatten[-1],
+                                size=src.shape[2:],
+                                mode='nearest'))
+                lvc_flatten = [
+                    lvc.flatten(2).transpose(1, 2) for lvc in lvc_flatten[::-1]
+                ]
                 lvc_flatten = torch.cat(lvc_flatten, 1)
                 memory = torch.cat([lvc_flatten, memory_list[-1]], -1)
                 memory = self.memory_reduce(memory)
@@ -402,7 +409,9 @@ class DeformableTransformer(nn.Module):
                 bs, _, num_classes = enc_token_class.shape
                 enc_token_class_unflat = []
                 for st, (h, w) in zip(level_start_index, spatial_shapes):
-                    enc_token_class_unflat.append(enc_token_class[:, st:st+h*w, :].view(bs, h, w, num_classes))
+                    enc_token_class_unflat.append(
+                        enc_token_class[:, st:st + h * w, :].view(
+                            bs, h, w, num_classes))
 
             if self.two_stage_pat_embed > 0:
                 bs, nhw, _ = output_memory.shape
@@ -709,7 +718,7 @@ class TransformerEncoder(nn.Module):
                     ref_token_index.unsqueeze(-1).repeat(1, 1, self.d_model))
                 intermediate_output.append(out_i)
                 intermediate_ref.append(ref_token_coord)
-            
+
             outputs.append(output)
 
         if self.norm is not None:

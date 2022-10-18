@@ -3,4 +3,5 @@ _base_ = [
     './dino_schedule_1x.py'
 ]
 
-model = dict(head=dict(num_classes=365))
+model = dict(
+    head=dict(dn_components=dict(dn_labelbook_size=365), num_classes=365))

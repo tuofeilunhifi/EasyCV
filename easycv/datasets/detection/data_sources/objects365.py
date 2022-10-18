@@ -5,6 +5,13 @@ from xtcocotools.coco import COCO
 from easycv.datasets.detection.data_sources.coco import DetSourceCoco
 from easycv.datasets.registry import DATASOURCES
 
+# images exist in annotations but not in image folder.
+objv2_ignore_list = [
+    'patch16/objects365_v2_00908726.jpg',
+    'patch6/objects365_v1_00320532.jpg',
+    'patch6/objects365_v1_00320534.jpg',
+]
+
 
 @DATASOURCES.register_module
 class DetSourceObjects365(DetSourceCoco):
@@ -58,9 +65,10 @@ class DetSourceObjects365(DetSourceCoco):
             info['patch_name'] = osp.join(
                 osp.split(osp.split(info['file_name'])[0])[-1],
                 osp.split(info['file_name'])[-1])
-            img_absolute_path = osp.join(self.img_prefix, info['patch_name'])
-            if not osp.exists(img_absolute_path):
+            if 'train' in self.img_prefix and info[
+                    'patch_name'] in objv2_ignore_list:
                 continue
+
             info['filename'] = info['patch_name']
 
             data_infos.append(info)
