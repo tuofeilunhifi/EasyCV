@@ -5,7 +5,8 @@ _base_ = [
 ]
 
 data = dict(
-    imgs_per_gpu=2)  # total 64 = 4(node_num) * 8(gpu_num) * 2(batch_size)
+    imgs_per_gpu=2
+)  # total 64 = 2(update_interval) * 2(node_num) * 8(gpu_num) * 2(batch_size)
 
 # model settings
 model = dict(
@@ -17,6 +18,9 @@ model = dict(
         losses_list=['labels', 'boxes', 'centerness', 'iouaware'],
         transformer=dict(multi_encoder_memory=True),
         weight_dict=dict(loss_ce=2, loss_center=2, loss_iouaware=2)))
+
+# optimizer
+optimizer_config = dict(update_interval=2)
 
 # learning policy
 lr_config = dict(policy='step', step=[26])

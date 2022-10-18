@@ -5,6 +5,7 @@ from distutils.version import LooseVersion
 import torch
 from mmcv.parallel import is_module_wrapper
 from mmcv.runner import OptimizerHook as _OptimizerHook
+from torch.nn.modules.batchnorm import _BatchNorm
 
 from easycv.utils.dist_utils import get_dist_info
 from easycv.utils.torchacc_util import is_torchacc_enabled
@@ -46,6 +47,10 @@ class OptimizerHook(_OptimizerHook):
         self.multiply_key = multiply_key
         self.multiply_rate = multiply_rate
 
+        self.divisible_iters = 0
+        self.remainder_iters = 0
+        self.initialized = False
+
     def _get_module(self, runner):
         module = runner.model
         if is_module_wrapper(module):
@@ -72,9 +77,46 @@ class OptimizerHook(_OptimizerHook):
         xm.all_reduce(
             xm.REDUCE_SUM, gradients, scale=1.0 / xm.xrt_world_size())
 
+    def has_batch_norm(self, module):
+        if isinstance(module, _BatchNorm):
+            return True
+        for m in module.children():
+            if self.has_batch_norm(m):
+                return True
+        return False
+
+    def _init(self, runner):
+        if runner.iter % self.update_interval != 0:
+            runner.logger.warning(
+                'Resume iter number is not divisible by update_interval in '
+                'GradientCumulativeOptimizerHook, which means the gradient of '
+                'some iters is lost and the result may be influenced slightly.'
+            )
+
+        if self.has_batch_norm(runner.model) and self.update_interval > 1:
+            runner.logger.warning(
+                'GradientCumulativeOptimizerHook may slightly decrease '
+                'performance if the model has BatchNorm layers.')
+
+        residual_iters = runner.max_iters - runner.iter
+
+        self.divisible_iters = (
+            residual_iters // self.update_interval * self.update_interval)
+        self.remainder_iters = residual_iters - self.divisible_iters
+
+        self.initialized = True
+
     def after_train_iter(self, runner):
+        if not self.initialized:
+            self._init(runner)
+
+        if runner.iter < self.divisible_iters:
+            loss_factor = self.update_interval
+        else:
+            loss_factor = self.remainder_iters
+
         if not torch.isnan(runner.outputs['loss']):
-            runner.outputs['loss'] /= self.update_interval
+            runner.outputs['loss'] /= loss_factor
             runner.outputs['loss'].backward()
 
             self.skip_ignore_key(runner)
@@ -127,6 +169,10 @@ class AMPFP16OptimizerHook(OptimizerHook):
         self.ignore_key_epoch = ignore_key_epoch
         self._scale_update_param = None
 
+        self.divisible_iters = 0
+        self.remainder_iters = 0
+        self.initialized = False
+
         if LooseVersion(torch.__version__) >= LooseVersion('1.6.0'):
             if isinstance(loss_scale, float):
                 self._scale_update_param = loss_scale
@@ -148,7 +194,15 @@ class AMPFP16OptimizerHook(OptimizerHook):
                 m.fp16_enabled = True
 
     def after_train_iter(self, runner):
-        loss = runner.outputs['loss'] / self.update_interval
+        if not self.initialized:
+            self._init(runner)
+
+        if runner.iter < self.divisible_iters:
+            loss_factor = self.update_interval
+        else:
+            loss_factor = self.remainder_iters
+
+        loss = runner.outputs['loss'] / loss_factor
 
         if LooseVersion(torch.__version__) >= LooseVersion('1.6.0'):
             self.scaler.scale(loss).backward()
