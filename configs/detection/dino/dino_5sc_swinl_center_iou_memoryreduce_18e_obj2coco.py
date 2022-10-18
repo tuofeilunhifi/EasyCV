@@ -19,3 +19,5 @@ model = dict(
 lr_config = dict(policy='step', step=[8])
 
 total_epochs = 18
+
+checkpoint_config = dict(interval=1)
