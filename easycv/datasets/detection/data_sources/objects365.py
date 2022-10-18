@@ -65,8 +65,7 @@ class DetSourceObjects365(DetSourceCoco):
             info['patch_name'] = osp.join(
                 osp.split(osp.split(info['file_name'])[0])[-1],
                 osp.split(info['file_name'])[-1])
-            if 'train' in self.img_prefix and info[
-                    'patch_name'] in objv2_ignore_list:
+            if info['patch_name'] in objv2_ignore_list:
                 continue
 
             info['filename'] = info['patch_name']
