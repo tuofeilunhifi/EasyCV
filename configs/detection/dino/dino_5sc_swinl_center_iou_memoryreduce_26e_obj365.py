@@ -20,7 +20,7 @@ model = dict(
         weight_dict=dict(loss_ce=2, loss_center=2, loss_iouaware=2)))
 
 # optimizer
-optimizer_config = dict(update_interval=2)
+optimizer_config = dict(update_interval=1)
 
 # learning policy
 lr_config = dict(policy='step', step=[26])
