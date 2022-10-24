@@ -180,7 +180,7 @@ data = dict(
     drop_last=True)
 
 # evaluation
-eval_config = dict(initial=True, interval=1, gpu_collect=False)
+eval_config = dict(initial=False, interval=1, gpu_collect=False)
 eval_pipelines = [
     dict(
         mode='test',
