@@ -4,7 +4,8 @@ import logging
 from easycv.models.detection.detectors.dab_detr import (DABDETRHead,
                                                         DABDetrTransformer)
 from easycv.models.detection.detectors.detection import Detection
-from easycv.models.detection.detectors.detr import DETRHead, DetrTransformer
+from easycv.models.detection.detectors.detr import (DETRHead, DetrTransformer,
+                                                    SlotTransformer)
 from easycv.models.detection.detectors.dino import (DeformableTransformer,
                                                     DINOHead)
 from easycv.models.detection.detectors.fcos import FCOSHead
