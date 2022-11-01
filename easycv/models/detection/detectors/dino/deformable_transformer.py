@@ -13,6 +13,7 @@ import random
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from easycv.framework.errors import NotImplementedError
@@ -69,6 +70,7 @@ class DeformableTransformer(nn.Module):
         rm_detach=None,
         decoder_sa_type='sa',
         module_seq=['sa', 'ca', 'ffn'],
+        use_adaptivemixing=False,
         # for dn
         embed_init_tgt=False,
         use_detached_boxes_dec_out=False,
@@ -139,7 +141,8 @@ class DeformableTransformer(nn.Module):
                 dec_n_points,
                 key_aware_type=key_aware_type,
                 decoder_sa_type=decoder_sa_type,
-                module_seq=module_seq)
+                module_seq=module_seq,
+                use_adaptivemixing=use_adaptivemixing)
 
         else:
             raise NotImplementedError
@@ -977,6 +980,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         key_aware_type=None,
         decoder_sa_type='ca',
         module_seq=['sa', 'ca', 'ffn'],
+        use_adaptivemixing=False,
     ):
         super().__init__()
         self.module_seq = module_seq
@@ -985,7 +989,20 @@ class DeformableTransformerDecoderLayer(nn.Module):
         # cross attention
         from thirdparty.deformable_attention.modules import MSDeformAttn
         self.cross_attn = MSDeformAttn(
-            d_model, n_levels, n_heads, n_points, im2col_step=64)
+            d_model,
+            n_levels,
+            n_heads,
+            n_points,
+            im2col_step=64,
+            use_adaptivemixing=use_adaptivemixing)
+        self.use_adaptivemixing = use_adaptivemixing
+        if self.use_adaptivemixing:
+            self.adaptivemixing = AdaptiveMixing(
+                in_dim=d_model,
+                in_points=n_levels * n_points,
+                n_groups=n_heads)
+        self.n_heads = n_heads
+        self.d_model = d_model
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
 
@@ -1117,15 +1134,63 @@ class DeformableTransformerDecoderLayer(nn.Module):
             else:
                 raise NotImplementedError('Unknown key_aware_type: {}'.format(
                     self.key_aware_type))
-        tgt2 = self.cross_attn(
-            self.with_pos_embed(tgt, tgt_query_pos).transpose(0, 1),
-            tgt_reference_points.transpose(0, 1).contiguous(),
-            memory.transpose(0, 1), memory_spatial_shapes,
-            memory_level_start_index, memory_key_padding_mask).transpose(0, 1)
+        if not self.use_adaptivemixing:
+            tgt2 = self.cross_attn(
+                self.with_pos_embed(tgt, tgt_query_pos).transpose(0, 1),
+                tgt_reference_points.transpose(0, 1).contiguous(),
+                memory.transpose(0, 1), memory_spatial_shapes,
+                memory_level_start_index,
+                memory_key_padding_mask).transpose(0, 1)
+        else:
+            sampling_locations = self.cross_attn(
+                self.with_pos_embed(tgt, tgt_query_pos).transpose(0, 1),
+                tgt_reference_points.transpose(0, 1).contiguous(),
+                memory.transpose(0, 1), memory_spatial_shapes,
+                memory_level_start_index, memory_key_padding_mask)
+            sampled_feature = self.sample(
+                memory.transpose(0, 1), memory_spatial_shapes,
+                sampling_locations)
+            tgt2 = self.adaptivemixing(sampled_feature,
+                                       tgt.transpose(0, 1)).transpose(0, 1)
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
 
         return tgt
+
+    def sample(self, value, value_spatial_shapes, sampling_locations):
+        N, Len_in, _ = value.shape
+        value = value.view(N, Len_in, self.n_heads,
+                           self.d_model // self.n_heads)
+        # need to use cuda version instead
+        N_, S_, M_, D_ = value.shape
+        _, Lq_, M_, L_, P_, _ = sampling_locations.shape
+        value_list = value.split([H_ * W_ for H_, W_ in value_spatial_shapes],
+                                 dim=1)
+        sampling_grids = 2 * sampling_locations - 1
+        sampling_value_list = []
+        for lid_, (H_, W_) in enumerate(value_spatial_shapes):
+            # N_, H_*W_, M_, D_ -> N_, H_*W_, M_*D_ -> N_, M_*D_, H_*W_ -> N_*M_, D_, H_, W_
+            value_l_ = value_list[lid_].flatten(2).transpose(1, 2).reshape(
+                N_ * M_, D_, H_, W_)
+            # N_, Lq_, M_, P_, 2 -> N_, M_, Lq_, P_, 2 -> N_*M_, Lq_, P_, 2
+            sampling_grid_l_ = sampling_grids[:, :, :,
+                                              lid_].transpose(1,
+                                                              2).flatten(0, 1)
+            # N_*M_, D_, Lq_, P_
+            sampling_value_l_ = F.grid_sample(
+                value_l_,
+                sampling_grid_l_,
+                mode='bilinear',
+                padding_mode='zeros',
+                align_corners=False)
+            sampling_value_list.append(sampling_value_l_)
+        sampling_value = torch.stack(
+            sampling_value_list,
+            dim=-2)  # N_*M_, D_, Lq_, L, P_ (2*8, 32, 1092, 4, 4)
+        sampling_value = sampling_value.view(N_, M_, D_, Lq_, -1).permute(
+            0, 3, 1, 4,
+            2)  # batch, num_query, group, point, channel (2, 1092, 8, 16, 32)
+        return sampling_value
 
     def forward(
             self,
@@ -1176,3 +1241,99 @@ class DeformableTransformerDecoderLayer(nn.Module):
                 raise ValueError('unknown funcname {}'.format(funcname))
 
         return tgt
+
+
+class AdaptiveMixing(nn.Module):
+
+    def __init__(self,
+                 in_dim,
+                 in_points=16,
+                 n_groups=8,
+                 query_dim=None,
+                 out_dim=None,
+                 out_points=None,
+                 sampling_rate=None):
+        super(AdaptiveMixing, self).__init__()
+        out_dim = out_dim if out_dim is not None else in_dim
+        out_points = out_points if out_points is not None else in_points
+        query_dim = query_dim if query_dim is not None else in_dim
+        sampling_rate = sampling_rate if sampling_rate is not None else 1
+
+        self.query_dim = query_dim
+        self.in_dim = in_dim
+        self.in_points = in_points // sampling_rate
+        self.n_groups = n_groups
+        self.out_dim = out_dim
+        self.out_points = out_points
+
+        self.eff_in_dim = in_dim // n_groups
+        self.eff_out_dim = out_dim // n_groups
+
+        self.m_parameters = self.eff_in_dim * self.eff_out_dim
+        self.s_parameters = self.in_points * self.out_points
+
+        self.total_parameters = self.m_parameters + self.s_parameters
+
+        self.parameter_generator = nn.Sequential(
+            nn.Linear(self.query_dim, self.n_groups * self.total_parameters), )
+
+        self.out_proj = nn.Linear(
+            self.eff_out_dim * self.out_points * self.n_groups,
+            self.query_dim,
+            bias=True)
+
+        self.act = nn.ReLU(inplace=True)
+
+        self.init_weights()
+
+    @torch.no_grad()
+    def init_weights(self):
+        nn.init.zeros_(self.parameter_generator[-1].weight)
+
+    def forward(self, x, query):
+
+        B, N, g, P, C = x.size()
+        # batch, num_query, group, point, channel
+        G = self.n_groups
+        assert g == G
+        # assert C*g == self.in_dim
+
+        # query: B, N, C
+        # x: B, N, G, Px, Cx
+        '''generate mixing parameters'''
+        params = self.parameter_generator(query)
+        params = params.reshape(B * N, G, -1)
+
+        out = x.reshape(B * N, G, P, C)
+
+        M, S = params.split([self.m_parameters, self.s_parameters], 2)
+        '''you can choose one implementation below'''
+        if False:
+            out = out.reshape(B * N * G, P, C)
+
+            M = M.reshape(B * N * G, self.eff_in_dim, self.eff_out_dim)
+            S = S.reshape(B * N * G, self.out_points, self.in_points)
+            '''adaptive channel mixing'''
+            out = torch.bmm(out, M)
+            out = F.layer_norm(out, [out.size(-2), out.size(-1)])
+            out = self.act(out)
+            '''adaptive spatial mixing'''
+            out = torch.bmm(S, out)  # implicitly transpose and matmul
+            out = F.layer_norm(out, [out.size(-2), out.size(-1)])
+            out = self.act(out)
+        else:
+            M = M.reshape(B * N, G, self.eff_in_dim, self.eff_out_dim)
+            S = S.reshape(B * N, G, self.out_points, self.in_points)
+            '''adaptive channel mixing'''
+            out = torch.matmul(out, M)
+            out = F.layer_norm(out, [out.size(-2), out.size(-1)])
+            out = self.act(out)
+            '''adaptive spatial mixing'''
+            out = torch.matmul(S, out)  # implicitly transpose and matmul
+            out = F.layer_norm(out, [out.size(-2), out.size(-1)])
+            out = self.act(out)
+        '''linear transfomation to query dim'''
+        out = out.reshape(B, N, -1)
+        out = self.out_proj(out)
+
+        return out

@@ -121,6 +121,7 @@ def prepare_for_cdn(dn_args, training, num_queries, num_classes, hidden_dim,
         attn_mask = torch.ones(tgt_size, tgt_size).to('cuda') < 0
         # match query cannot see the reconstruct
         attn_mask[pad_size:, :pad_size] = True
+        attn_mask[:pad_size, pad_size:] = True
         # reconstruct cannot see each other
         for i in range(dn_number):
             if i == 0:
