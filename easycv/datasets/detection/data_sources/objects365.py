@@ -5,8 +5,8 @@ from xtcocotools.coco import COCO
 from easycv.datasets.detection.data_sources.coco import DetSourceCoco
 from easycv.datasets.registry import DATASOURCES
 
-# images exist in annotations but not in image folder.
 objv2_ignore_list = [
+    # images exist in annotations but not in image folder.
     'patch16/objects365_v2_00908726.jpg',
     'patch6/objects365_v1_00320532.jpg',
     'patch6/objects365_v1_00320534.jpg',

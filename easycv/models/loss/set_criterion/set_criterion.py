@@ -1,24 +1,28 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
+from typing import Any, List, Optional, Union
+
+import cv2
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
+from torchvision.ops import roi_align
 
 from easycv.models.detection.utils import (accuracy, box_cxcywh_to_xyxy,
                                            box_iou, generalized_box_iou)
 from easycv.models.loss.focal_loss import py_sigmoid_focal_loss
 from easycv.models.utils import get_world_size, is_dist_avail_and_initialized
 
-from typing import Optional, List, Union, Any
-from torch import Tensor
-
-from torchvision.ops import roi_align
-import numpy as np
-import cv2
-
 
 # NOTE: torchvision's RoIAlign has a different default aligned=False
 class ROIAlign(nn.Module):
-    def __init__(self, output_size, spatial_scale, sampling_ratio, aligned=True):
+
+    def __init__(self,
+                 output_size,
+                 spatial_scale,
+                 sampling_ratio,
+                 aligned=True):
         """
         Args:
             output_size (tuple): h, w
@@ -55,9 +59,9 @@ class ROIAlign(nn.Module):
 
         from torchvision import __version__
 
-        version = tuple(int(x) for x in __version__.split(".")[:2])
+        version = tuple(int(x) for x in __version__.split('.')[:2])
         # https://github.com/pytorch/vision/pull/2438
-        #assert version >= (0, 7), "Require torchvision >= 0.7"
+        # assert version >= (0, 7), "Require torchvision >= 0.7"
 
     def forward(self, input, rois):
         """
@@ -78,13 +82,14 @@ class ROIAlign(nn.Module):
         )
 
     def __repr__(self):
-        tmpstr = self.__class__.__name__ + "("
-        tmpstr += "output_size=" + str(self.output_size)
-        tmpstr += ", spatial_scale=" + str(self.spatial_scale)
-        tmpstr += ", sampling_ratio=" + str(self.sampling_ratio)
-        tmpstr += ", aligned=" + str(self.aligned)
-        tmpstr += ")"
+        tmpstr = self.__class__.__name__ + '('
+        tmpstr += 'output_size=' + str(self.output_size)
+        tmpstr += ', spatial_scale=' + str(self.spatial_scale)
+        tmpstr += ', sampling_ratio=' + str(self.sampling_ratio)
+        tmpstr += ', aligned=' + str(self.aligned)
+        tmpstr += ')'
         return tmpstr
+
 
 class BitMasks:
     """
@@ -100,14 +105,15 @@ class BitMasks:
         Args:
             tensor: bool Tensor of N,H,W, representing N instances in the image.
         """
-        device = tensor.device if isinstance(tensor, torch.Tensor) else torch.device("cpu")
+        device = tensor.device if isinstance(
+            tensor, torch.Tensor) else torch.device('cpu')
         tensor = torch.as_tensor(tensor, dtype=torch.bool, device=device)
         assert tensor.dim() == 3, tensor.size()
         self.image_size = tensor.shape[1:]
         self.tensor = tensor
 
     @torch.jit.unused
-    def to(self, *args: Any, **kwargs: Any) -> "BitMasks":
+    def to(self, *args: Any, **kwargs: Any) -> 'BitMasks':
         return BitMasks(self.tensor.to(*args, **kwargs))
 
     @property
@@ -115,7 +121,8 @@ class BitMasks:
         return self.tensor.device
 
     @torch.jit.unused
-    def __getitem__(self, item: Union[int, slice, torch.BoolTensor]) -> "BitMasks":
+    def __getitem__(self, item: Union[int, slice,
+                                      torch.BoolTensor]) -> 'BitMasks':
         """
         Returns:
             BitMasks: Create a new :class:`BitMasks` by indexing.
@@ -133,9 +140,9 @@ class BitMasks:
         if isinstance(item, int):
             return BitMasks(self.tensor[item].unsqueeze(0))
         m = self.tensor[item]
-        assert m.dim() == 3, "Indexing on BitMasks with {} returns a tensor with shape {}!".format(
-            item, m.shape
-        )
+        assert m.dim(
+        ) == 3, 'Indexing on BitMasks with {} returns a tensor with shape {}!'.format(
+            item, m.shape)
         return BitMasks(m)
 
     @torch.jit.unused
@@ -144,8 +151,8 @@ class BitMasks:
 
     @torch.jit.unused
     def __repr__(self) -> str:
-        s = self.__class__.__name__ + "("
-        s += "num_instances={})".format(len(self.tensor))
+        s = self.__class__.__name__ + '('
+        s += 'num_instances={})'.format(len(self.tensor))
         return s
 
     def __len__(self) -> int:
@@ -161,25 +168,24 @@ class BitMasks:
         """
         return self.tensor.flatten(1).any(dim=1)
 
-    @staticmethod
-    def from_polygon_masks(
-        polygon_masks: Union["PolygonMasks", List[List[np.ndarray]]], height: int, width: int
-    ) -> "BitMasks":
-        """
-        Args:
-            polygon_masks (list[list[ndarray]] or PolygonMasks)
-            height, width (int)
-        """
-        if isinstance(polygon_masks, PolygonMasks):
-            polygon_masks = polygon_masks.polygons
-        masks = [polygons_to_bitmask(p, height, width) for p in polygon_masks]
-        if len(masks):
-            return BitMasks(torch.stack([torch.from_numpy(x) for x in masks]))
-        else:
-            return BitMasks(torch.empty(0, height, width, dtype=torch.bool))
+    # @staticmethod
+    # def from_polygon_masks(polygon_masks: Union[List[List[np.ndarray]]],
+    #                        height: int, width: int):
+    #     """
+    #     Args:
+    #         polygon_masks (list[list[ndarray]] or PolygonMasks)
+    #         height, width (int)
+    #     """
+    #     if isinstance(polygon_masks, PolygonMasks):
+    #         polygon_masks = polygon_masks.polygons
+    #     masks = [polygons_to_bitmask(p, height, width) for p in polygon_masks]
+    #     if len(masks):
+    #         return BitMasks(torch.stack([torch.from_numpy(x) for x in masks]))
+    #     else:
+    #         return BitMasks(torch.empty(0, height, width, dtype=torch.bool))
 
     @staticmethod
-    def from_roi_masks(roi_masks: "ROIMasks", height: int, width: int) -> "BitMasks":
+    def from_roi_masks(roi_masks, height: int, width: int):
         """
         Args:
             roi_masks:
@@ -187,7 +193,8 @@ class BitMasks:
         """
         return roi_masks.to_bitmasks(height, width)
 
-    def crop_and_resize(self, boxes: torch.Tensor, mask_size: int) -> torch.Tensor:
+    def crop_and_resize(self, boxes: torch.Tensor,
+                        mask_size: int) -> torch.Tensor:
         """
         Crop each bitmask by the given box, and resize results to (mask_size, mask_size).
         This can be used to prepare training targets for Mask R-CNN.
@@ -204,23 +211,26 @@ class BitMasks:
                 A bool tensor of shape (N, mask_size, mask_size), where
                 N is the number of predicted boxes for this image.
         """
-        assert len(boxes) == len(self), "{} != {}".format(len(boxes), len(self))
+        assert len(boxes) == len(self), '{} != {}'.format(
+            len(boxes), len(self))
         device = self.tensor.device
 
-        batch_inds = torch.arange(len(boxes), device=device).to(dtype=boxes.dtype)[:, None]
+        batch_inds = torch.arange(
+            len(boxes), device=device).to(dtype=boxes.dtype)[:, None]
         rois = torch.cat([batch_inds, boxes], dim=1)  # Nx5
 
         bit_masks = self.tensor.to(dtype=torch.float32)
         rois = rois.to(device=device)
         output = (
-            ROIAlign((mask_size, mask_size), 1.0, 0, aligned=True)
-            .forward(bit_masks[:, None, :, :], rois)
-            .squeeze(1)
-        )
+            ROIAlign((mask_size, mask_size), 1.0, 0,
+                     aligned=True).forward(bit_masks[:, None, :, :],
+                                           rois).squeeze(1))
         output = output >= 0.5
         return output
 
+
 class NestedTensor(object):
+
     def __init__(self, tensors, mask: Optional[Tensor]):
         self.tensors = tensors
         self.mask = mask
@@ -247,6 +257,7 @@ class NestedTensor(object):
     def __repr__(self):
         return str(self.tensors)
 
+
 def _max_by_axis(the_list):
     # type: (List[List[int]]) -> List[int]
     maxes = the_list[0]
@@ -254,6 +265,7 @@ def _max_by_axis(the_list):
         for index, item in enumerate(sublist):
             maxes[index] = max(maxes[index], item)
     return maxes
+
 
 def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
     # TODO make this more general
@@ -268,11 +280,12 @@ def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
         tensor = torch.zeros(batch_shape, dtype=dtype, device=device)
         mask = torch.ones((b, h, w), dtype=torch.bool, device=device)
         for img, pad_img, m in zip(tensor_list, tensor, mask):
-            pad_img[: img.shape[0], : img.shape[1], : img.shape[2]].copy_(img)
-            m[: img.shape[1], :img.shape[2]] = False
+            pad_img[:img.shape[0], :img.shape[1], :img.shape[2]].copy_(img)
+            m[:img.shape[1], :img.shape[2]] = False
     else:
         raise ValueError('not supported')
     return NestedTensor(tensor, mask)
+
 
 class SetCriterion(nn.Module):
     """ This class computes the loss for Conditional DETR.
@@ -398,17 +411,21 @@ class SetCriterion(nn.Module):
         """Compute the losses related to the masks: the focal loss and the dice loss.
            targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
         """
-        assert "pred_vectors" in outputs
+        assert 'pred_vectors' in outputs
 
         src_idx = self._get_src_permutation_idx(indices)
         tgt_idx = self._get_tgt_permutation_idx(indices)
 
-        src_masks = outputs["pred_vectors"]
+        src_masks = outputs['pred_vectors']
         src_boxes = outputs['pred_boxes']
 
         # TODO use valid to mask invalid areas due to padding in loss
-        target_boxes = torch.cat([t['xyxy_boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-        target_masks, valid = nested_tensor_from_tensor_list([t["masks"].to_tensor(dtype=torch.bool, device=src_masks.device) for t in targets]).decompose()
+        target_boxes = torch.cat(
+            [t['xyxy_boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        target_masks, valid = nested_tensor_from_tensor_list([
+            t['masks'].to_tensor(dtype=torch.bool, device=src_masks.device)
+            for t in targets
+        ]).decompose()
         target_masks = target_masks.to(src_masks)
         src_vectors = src_masks[src_idx]
         src_boxes = src_boxes[src_idx]
@@ -417,19 +434,19 @@ class SetCriterion(nn.Module):
         # crop gt_masks
         n_keep, gt_mask_len = self.processor_dct.n_keep, self.processor_dct.gt_mask_len
         gt_masks = BitMasks(target_masks)
-        gt_masks = gt_masks.crop_and_resize(target_boxes, gt_mask_len).to(device=src_masks.device).float()
+        gt_masks = gt_masks.crop_and_resize(
+            target_boxes, gt_mask_len).to(device=src_masks.device).float()
         target_masks = gt_masks
 
         if target_masks.shape[0] == 0:
-            losses = {
-                "loss_vector": src_vectors.sum() * 0
-            }
+            losses = {'loss_vector': src_vectors.sum() * 0}
             return losses
 
         # perform dct transform
         target_vectors = []
         for i in range(target_masks.shape[0]):
-            gt_mask_i = ((target_masks[i,:,:] >= 0.5)* 1).to(dtype=torch.uint8)
+            gt_mask_i = ((target_masks[i, :, :] >= 0.5) *
+                         1).to(dtype=torch.uint8)
             gt_mask_i = gt_mask_i.cpu().numpy().astype(np.float32)
             coeffs = cv2.dct(gt_mask_i)
             coeffs = torch.from_numpy(coeffs).flatten()
@@ -437,9 +454,11 @@ class SetCriterion(nn.Module):
             gt_label = coeffs.unsqueeze(0)
             target_vectors.append(gt_label)
 
-        target_vectors = torch.cat(target_vectors, dim=0).to(device=src_vectors.device)
+        target_vectors = torch.cat(
+            target_vectors, dim=0).to(device=src_vectors.device)
         losses = {}
-        losses['loss_vector'] = F.l1_loss(src_vectors, target_vectors, reduction='mean')
+        losses['loss_vector'] = F.l1_loss(
+            src_vectors, target_vectors, reduction='mean')
 
         return losses
 
@@ -531,35 +550,51 @@ class SetCriterion(nn.Module):
             loss = 1 - (numerator + 1) / (denominator + 1)
             return loss.sum() / num_boxes
 
-        target_masks, valid = nested_tensor_from_tensor_list([t["masks"].to_tensor(dtype=torch.bool, device=enc_token_class_unflat[0].device) for t in targets]).decompose()
+        target_masks, valid = nested_tensor_from_tensor_list([
+            t['masks'].to_tensor(
+                dtype=torch.bool, device=enc_token_class_unflat[0].device)
+            for t in targets
+        ]).decompose()
 
         bs, n, h, w = target_masks.shape
-        mask = torch.zeros((bs, h, w), dtype=torch.bool, device=target_masks.device)
+        mask = torch.zeros((bs, h, w),
+                           dtype=torch.bool,
+                           device=target_masks.device)
         for j in range(n):
             target_masks[:, j] &= target_masks[:, j] ^ mask
             mask |= target_masks[:, j]
-        target_classes_pad = torch.stack([F.pad(t['labels'], (0, n - len(t['labels']))) for t in targets])
-        final_mask = torch.sum(target_masks * target_classes_pad[:, :, None, None], dim=1)  # (bs, h, w)
-        final_mask_onehot = torch.zeros((bs, h, w, self.num_classes), dtype=torch.float32, device=target_masks.device)
-        final_mask_onehot.scatter_(-1, final_mask.unsqueeze(-1), 1)  # (bs, h, w, 80)
-        final_mask_onehot[..., 0] = 1 - final_mask_onehot[..., 0]  # change index 0 from background to foreground
+        target_classes_pad = torch.stack(
+            [F.pad(t['labels'], (0, n - len(t['labels']))) for t in targets])
+        final_mask = torch.sum(
+            target_masks * target_classes_pad[:, :, None, None],
+            dim=1)  # (bs, h, w)
+        final_mask_onehot = torch.zeros((bs, h, w, self.num_classes),
+                                        dtype=torch.float32,
+                                        device=target_masks.device)
+        final_mask_onehot.scatter_(-1, final_mask.unsqueeze(-1),
+                                   1)  # (bs, h, w, 80)
+        final_mask_onehot[..., 0] = 1 - final_mask_onehot[
+            ..., 0]  # change index 0 from background to foreground
 
         loss_token_focal = 0
         loss_token_dice = 0
         for i, enc_token_class in enumerate(enc_token_class_unflat):
             _, h, w, _ = enc_token_class.shape
 
-            final_mask_soft = F.adaptive_avg_pool2d(final_mask_onehot.permute(0, 3, 1, 2), (h,w)).permute(0, 2, 3, 1)
+            final_mask_soft = F.adaptive_avg_pool2d(
+                final_mask_onehot.permute(0, 3, 1, 2),
+                (h, w)).permute(0, 2, 3, 1)
 
             enc_token_class = enc_token_class.flatten(1, 2)
             final_mask_soft = final_mask_soft.flatten(1, 2)
             loss_token_focal += py_sigmoid_focal_loss(
-                                    enc_token_class,
-                                    final_mask_soft,
-                                    alpha=0.25,
-                                    gamma=2,
-                                    reduction='none').mean(1).sum() / num_boxes
-            loss_token_dice += dice_loss(enc_token_class, final_mask_soft, num_boxes)
+                enc_token_class,
+                final_mask_soft,
+                alpha=0.25,
+                gamma=2,
+                reduction='none').mean(1).sum() / num_boxes
+            loss_token_dice += dice_loss(enc_token_class, final_mask_soft,
+                                         num_boxes)
 
         losses = {
             'loss_token_focal': loss_token_focal,
@@ -593,7 +628,12 @@ class SetCriterion(nn.Module):
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
 
-    def forward(self, outputs, targets, num_boxes=None, return_indices=False):
+    def forward(self,
+                outputs,
+                targets,
+                num_boxes=None,
+                return_indices=False,
+                img_metas=None):
         """ This performs the loss computation.
         Parameters:
              outputs: dict of tensors, see the output specification of the model for the format
@@ -608,6 +648,10 @@ class SetCriterion(nn.Module):
             for k, v in outputs.items() if k != 'aux_outputs'
         }
 
+        out_bbox = outputs_without_aux['pred_boxes'].flatten(
+            0, 1)  # [batch_size * num_queries, 4]
+        boxes1 = box_cxcywh_to_xyxy(out_bbox)
+        assert (boxes1[:, 2:] >= boxes1[:, :2]).all(), img_metas
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs_without_aux, targets)
         if return_indices:
@@ -638,6 +682,10 @@ class SetCriterion(nn.Module):
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
+                out_bbox = aux_outputs['pred_boxes'].flatten(
+                    0, 1)  # [batch_size * num_queries, 4]
+                boxes1 = box_cxcywh_to_xyxy(out_bbox)
+                assert (boxes1[:, 2:] >= boxes1[:, :2]).all(), img_metas
                 indices = self.matcher(aux_outputs, targets)
                 if return_indices:
                     indices_list.append(indices)
@@ -661,6 +709,10 @@ class SetCriterion(nn.Module):
         # interm_outputs loss
         if 'interm_outputs' in outputs:
             interm_outputs = outputs['interm_outputs']
+            out_bbox = interm_outputs['pred_boxes'].flatten(
+                0, 1)  # [batch_size * num_queries, 4]
+            boxes1 = box_cxcywh_to_xyxy(out_bbox)
+            assert (boxes1[:, 2:] >= boxes1[:, :2]).all(), img_metas
             indices = self.matcher(interm_outputs, targets)
             if return_indices:
                 indices_list.append(indices)
@@ -680,7 +732,8 @@ class SetCriterion(nn.Module):
                     for k, v in l_dict.items()
                 }
                 losses.update(l_dict)
-            if 'pred_tokens' in interm_outputs and interm_outputs['pred_tokens'] is not None:
+            if 'pred_tokens' in interm_outputs and interm_outputs[
+                    'pred_tokens'] is not None:
                 l_dict = self.loss_tokens(interm_outputs, targets, num_boxes)
                 l_dict = {
                     k + '_interm':
@@ -728,7 +781,7 @@ class CDNCriterion(SetCriterion):
 
         return output_known_lbs_bboxes, single_pad, num_dn_groups
 
-    def forward(self, outputs, targets, aux_num, num_boxes):
+    def forward(self, outputs, targets, aux_num, num_boxes, img_metas=None):
         # Compute the average number of target boxes accross all nodes, for normalization purposes
 
         dn_meta = outputs['dn_meta']
@@ -814,8 +867,7 @@ class CDNCriterion(SetCriterion):
                     l_dict['loss_bbox_dn'] = torch.as_tensor(0.).to('cuda')
                     l_dict['loss_giou_dn'] = torch.as_tensor(0.).to('cuda')
                 if 'centerness' in self.losses:
-                    l_dict['loss_center_dn'] = torch.as_tensor(0.).to(
-                        'cuda')
+                    l_dict['loss_center_dn'] = torch.as_tensor(0.).to('cuda')
                 if 'iouaware' in self.losses:
                     l_dict['loss_iouaware_dn'] = torch.as_tensor(0.).to('cuda')
                 if 'masks' in self.losses:

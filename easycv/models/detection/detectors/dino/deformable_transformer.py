@@ -301,7 +301,8 @@ class DeformableTransformer(nn.Module):
                 refpoint_embed,
                 pos_embeds,
                 tgt,
-                attn_mask=None):
+                attn_mask=None,
+                img_metas=None):
         """
         Input:
             - srcs: List of multi features [bs, ci, hi, wi]
@@ -383,6 +384,7 @@ class DeformableTransformer(nn.Module):
                 memory = self.memory_reduce(memory)
             else:
                 memory = memory_list[-1]
+
         #########################################################
         # End Encoder
         # - memory: bs, \sum{hw}, c
@@ -448,8 +450,8 @@ class DeformableTransformer(nn.Module):
             refpoint_embed_ = refpoint_embed_undetach.detach()
             init_box_proposal = torch.gather(
                 output_proposals, 1,
-                topk_proposals.unsqueeze(-1).repeat(1, 1,
-                                                    4)).sigmoid()  # sigmoid
+                topk_proposals.unsqueeze(-1).repeat(
+                    1, 1, 4)).float().sigmoid()  # sigmoid
 
             # gather tgt
             tgt_undetach = torch.gather(
@@ -489,7 +491,7 @@ class DeformableTransformer(nn.Module):
                     self.num_queries, 1)  # 1, n_q*n_pat, d_model
                 tgt = tgt_embed + tgt_pat
 
-            init_box_proposal = refpoint_embed_.sigmoid()
+            init_box_proposal = refpoint_embed_.float().sigmoid()
 
         else:
             raise NotImplementedError('unknown two_stage_type {}'.format(
@@ -512,7 +514,8 @@ class DeformableTransformer(nn.Module):
             level_start_index=level_start_index,
             spatial_shapes=spatial_shapes,
             valid_ratios=valid_ratios,
-            tgt_mask=attn_mask)
+            tgt_mask=attn_mask,
+            img_metas=img_metas)
         #########################################################
         # End Decoder
         # hs: n_dec, bs, nq, d_model
@@ -529,7 +532,8 @@ class DeformableTransformer(nn.Module):
                 init_box_proposal = output_proposals
             else:
                 hs_enc = tgt_undetach.unsqueeze(0)
-                ref_enc = refpoint_embed_undetach.sigmoid().unsqueeze(0)
+                ref_enc = refpoint_embed_undetach.float().sigmoid().unsqueeze(
+                    0)
         else:
             hs_enc = ref_enc = None
         #########################################################
@@ -827,6 +831,7 @@ class TransformerDecoder(nn.Module):
         level_start_index: Optional[Tensor] = None,  # num_levels
         spatial_shapes: Optional[Tensor] = None,  # bs, num_levels, 2
         valid_ratios: Optional[Tensor] = None,
+        img_metas: Optional[Tensor] = None,
     ):
         """
         Input:
@@ -839,7 +844,7 @@ class TransformerDecoder(nn.Module):
         output = tgt
 
         intermediate = []
-        reference_points = refpoints_unsigmoid.sigmoid()
+        reference_points = refpoints_unsigmoid.float().sigmoid()
         ref_points = [reference_points]
 
         for layer_id, layer in enumerate(self.layers):
@@ -878,7 +883,7 @@ class TransformerDecoder(nn.Module):
             # modulated HW attentions
             if not self.deformable_decoder and self.modulate_hw_attn:
                 refHW_cond = self.ref_anchor_head(
-                    output).sigmoid()  # nq, bs, 2
+                    output).float().sigmoid()  # nq, bs, 2
                 query_sine_embed[..., self.d_model // 2:] *= (
                     refHW_cond[..., 0] /
                     reference_points[..., 2]).unsqueeze(-1)
@@ -905,15 +910,17 @@ class TransformerDecoder(nn.Module):
                     memory_spatial_shapes=spatial_shapes,
                     memory_pos=pos,
                     self_attn_mask=tgt_mask,
-                    cross_attn_mask=memory_mask)
+                    cross_attn_mask=memory_mask,
+                    img_metas=img_metas)
 
             # iter update
             if self.bbox_embed is not None:
 
                 reference_before_sigmoid = inverse_sigmoid(reference_points)
                 delta_unsig = self.bbox_embed[layer_id](output)
-                outputs_unsig = delta_unsig + reference_before_sigmoid
-                new_reference_points = outputs_unsig.sigmoid()
+                outputs_unsig = (delta_unsig +
+                                 reference_before_sigmoid).clamp(min=-11)
+                new_reference_points = outputs_unsig.float().sigmoid()
 
                 # select # ref points
                 if self.dec_layer_number is not None and layer_id != self.num_layers - 1:
@@ -1086,29 +1093,29 @@ class DeformableTransformerDecoderLayer(nn.Module):
         return tgt
 
     def forward_sa(
-            self,
-            # for tgt
-            tgt: Optional[Tensor],  # nq, bs, d_model
-            tgt_query_pos: Optional[
-                Tensor] = None,  # pos for query. MLP(Sine(pos))
-            tgt_query_sine_embed: Optional[
-                Tensor] = None,  # pos for query. Sine(pos)
-            tgt_key_padding_mask: Optional[Tensor] = None,
-            tgt_reference_points: Optional[Tensor] = None,  # nq, bs, 4
+        self,
+        # for tgt
+        tgt: Optional[Tensor],  # nq, bs, d_model
+        tgt_query_pos: Optional[
+            Tensor] = None,  # pos for query. MLP(Sine(pos))
+        tgt_query_sine_embed: Optional[
+            Tensor] = None,  # pos for query. Sine(pos)
+        tgt_key_padding_mask: Optional[Tensor] = None,
+        tgt_reference_points: Optional[Tensor] = None,  # nq, bs, 4
 
-            # for memory
+        # for memory
         memory: Optional[Tensor] = None,  # hw, bs, d_model
-            memory_key_padding_mask: Optional[Tensor] = None,
-            memory_level_start_index: Optional[Tensor] = None,  # num_levels
-            memory_spatial_shapes: Optional[
-                Tensor] = None,  # bs, num_levels, 2
-            memory_pos: Optional[Tensor] = None,  # pos for memory
+        memory_key_padding_mask: Optional[Tensor] = None,
+        memory_level_start_index: Optional[Tensor] = None,  # num_levels
+        memory_spatial_shapes: Optional[Tensor] = None,  # bs, num_levels, 2
+        memory_pos: Optional[Tensor] = None,  # pos for memory
 
-            # sa
+        # sa
         self_attn_mask: Optional[
             Tensor] = None,  # mask used for self-attention
-            cross_attn_mask: Optional[
-                Tensor] = None,  # mask used for cross-attention
+        cross_attn_mask: Optional[
+            Tensor] = None,  # mask used for cross-attention
+        img_metas: Optional[Tensor] = None,
     ):
         # self attention
         if self.self_attn is not None:
@@ -1185,29 +1192,29 @@ class DeformableTransformerDecoderLayer(nn.Module):
         return tgt
 
     def forward(
-            self,
-            # for tgt
-            tgt: Optional[Tensor],  # nq, bs, d_model
-            tgt_query_pos: Optional[
-                Tensor] = None,  # pos for query. MLP(Sine(pos))
-            tgt_query_sine_embed: Optional[
-                Tensor] = None,  # pos for query. Sine(pos)
-            tgt_key_padding_mask: Optional[Tensor] = None,
-            tgt_reference_points: Optional[Tensor] = None,  # nq, bs, 4
+        self,
+        # for tgt
+        tgt: Optional[Tensor],  # nq, bs, d_model
+        tgt_query_pos: Optional[
+            Tensor] = None,  # pos for query. MLP(Sine(pos))
+        tgt_query_sine_embed: Optional[
+            Tensor] = None,  # pos for query. Sine(pos)
+        tgt_key_padding_mask: Optional[Tensor] = None,
+        tgt_reference_points: Optional[Tensor] = None,  # nq, bs, 4
 
-            # for memory
+        # for memory
         memory: Optional[Tensor] = None,  # hw, bs, d_model
-            memory_key_padding_mask: Optional[Tensor] = None,
-            memory_level_start_index: Optional[Tensor] = None,  # num_levels
-            memory_spatial_shapes: Optional[
-                Tensor] = None,  # bs, num_levels, 2
-            memory_pos: Optional[Tensor] = None,  # pos for memory
+        memory_key_padding_mask: Optional[Tensor] = None,
+        memory_level_start_index: Optional[Tensor] = None,  # num_levels
+        memory_spatial_shapes: Optional[Tensor] = None,  # bs, num_levels, 2
+        memory_pos: Optional[Tensor] = None,  # pos for memory
 
-            # sa
+        # sa
         self_attn_mask: Optional[
             Tensor] = None,  # mask used for self-attention
-            cross_attn_mask: Optional[
-                Tensor] = None,  # mask used for cross-attention
+        cross_attn_mask: Optional[
+            Tensor] = None,  # mask used for cross-attention
+        img_metas: Optional[Tensor] = None,
     ):
 
         for funcname in self.module_seq:
@@ -1222,13 +1229,12 @@ class DeformableTransformerDecoderLayer(nn.Module):
                                       memory_spatial_shapes, memory_pos,
                                       self_attn_mask, cross_attn_mask)
             elif funcname == 'sa':
-                tgt = self.forward_sa(tgt, tgt_query_pos, tgt_query_sine_embed,
-                                      tgt_key_padding_mask,
-                                      tgt_reference_points, memory,
-                                      memory_key_padding_mask,
-                                      memory_level_start_index,
-                                      memory_spatial_shapes, memory_pos,
-                                      self_attn_mask, cross_attn_mask)
+                tgt = self.forward_sa(
+                    tgt, tgt_query_pos, tgt_query_sine_embed,
+                    tgt_key_padding_mask, tgt_reference_points, memory,
+                    memory_key_padding_mask, memory_level_start_index,
+                    memory_spatial_shapes, memory_pos, self_attn_mask,
+                    cross_attn_mask, img_metas)
             else:
                 raise ValueError('unknown funcname {}'.format(funcname))
 

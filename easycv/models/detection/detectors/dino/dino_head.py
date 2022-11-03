@@ -81,7 +81,8 @@ class DINOHead(nn.Module):
         super(DINOHead, self).__init__()
         self.use_vector = use_vector
         if self.use_vector:
-            self.processor_dct = ProcessorDCT(processor_dct.n_keep, processor_dct.gt_mask_len)
+            self.processor_dct = ProcessorDCT(processor_dct.n_keep,
+                                              processor_dct.gt_mask_len)
 
         self.matcher = HungarianMatcher(
             cost_dict=cost_dict, cost_class_type='focal_loss_cost')
@@ -237,17 +238,20 @@ class DINOHead(nn.Module):
             self.token_embed = nn.Linear(embed_dims, self.num_classes)
             prior_prob = 0.01
             bias_value = -math.log((1 - prior_prob) / prior_prob)
-            self.token_embed.bias.data = torch.ones(self.num_classes) * bias_value
+            self.token_embed.bias.data = torch.ones(
+                self.num_classes) * bias_value
             self.transformer.token_embed = self.token_embed
 
         # UQR module
         if self.use_vector:
             print(f'Training with vector_hidden_dim {embed_dims}.', flush=True)
-            _vector_embed = MLP(embed_dims, embed_dims, self.processor_dct.n_keep, 3)
+            _vector_embed = MLP(embed_dims, embed_dims,
+                                self.processor_dct.n_keep, 3)
             nn.init.constant_(_vector_embed.layers[-1].weight.data, 0)
             nn.init.constant_(_vector_embed.layers[-1].bias.data, 0)
             nn.init.constant_(_vector_embed.layers[-1].bias.data[2:], -2.0)
-            self.vector_embed = nn.ModuleList([_vector_embed for _ in range(transformer.num_decoder_layers)])
+            self.vector_embed = nn.ModuleList(
+                [_vector_embed for _ in range(transformer.num_decoder_layers)])
 
         # two stage
         self.two_stage_type = two_stage_type
@@ -342,8 +346,7 @@ class DINOHead(nn.Module):
 
         if self.dn_number > 0 or targets is not None:
             input_query_label, input_query_bbox, attn_mask, dn_meta =\
-                prepare_for_cdn(dn_args=(targets, self.dn_number, self.dn_label_noise_ratio, self.dn_box_noise_scale),
-                                training=self.training, num_queries=self.num_queries, num_classes=self.num_classes,
+                prepare_for_cdn(dn_args=(targets, self.dn_number, self.dn_label_noise_ratio, self.dn_box_noise_scale), num_queries=self.num_queries, num_classes=self.num_classes,
                                 hidden_dim=self.embed_dims, label_enc=self.label_enc)
         else:
             assert targets is None
@@ -413,7 +416,7 @@ class DINOHead(nn.Module):
                 poss.append(pos_l)
 
         hs, reference, hs_enc, ref_enc, init_box_proposal, enc_token_class_unflat = self.transformer(
-            srcs, masks, query_embed, poss, tgt, attn_mask)
+            srcs, masks, query_embed, poss, tgt, attn_mask, img_metas)
         # In case num object=0
         hs[0] += self.label_enc.weight[0, 0] * 0.0
 
@@ -423,9 +426,10 @@ class DINOHead(nn.Module):
         for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(
                 zip(reference[:-1], self.bbox_embed, hs)):
             layer_delta_unsig = layer_bbox_embed(layer_hs)
-            layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(
-                layer_ref_sig)
-            layer_outputs_unsig = layer_outputs_unsig.sigmoid()
+            layer_outputs_unsig = (layer_delta_unsig +
+                                   inverse_sigmoid(layer_ref_sig)).clamp(
+                                       min=-11)
+            layer_outputs_unsig = layer_outputs_unsig.float().sigmoid()
             outputs_coord_list.append(layer_outputs_unsig)
         outputs_coord_list = torch.stack(outputs_coord_list)
 
@@ -449,7 +453,7 @@ class DINOHead(nn.Module):
                 for layer_iou_embed, layer_hs in zip(self.iou_embed, hs)
             ])
 
-        ############ Added for UQR
+        # Added for UQR
         outputs_vector = None
         if self.use_vector:
             outputs_vector = torch.stack([
@@ -461,7 +465,8 @@ class DINOHead(nn.Module):
         if self.dn_number > 0 and dn_meta is not None:
             outputs_class, outputs_coord_list, outputs_center_list, outputs_iou_list, reference, outputs_vector = cdn_post_process(
                 outputs_class, outputs_coord_list, dn_meta, self._set_aux_loss,
-                outputs_center_list, outputs_iou_list, reference, outputs_vector)
+                outputs_center_list, outputs_iou_list, reference,
+                outputs_vector)
         out = {
             'pred_logits':
             outputs_class[-1],
@@ -474,13 +479,15 @@ class DINOHead(nn.Module):
             outputs_iou_list[-1] if outputs_iou_list is not None else None,
             'refpts':
             reference[-1],
-            'pred_vectors': outputs_vector[-1] if outputs_vector is not None else None
+            'pred_vectors':
+            outputs_vector[-1] if outputs_vector is not None else None
         }
 
         out['aux_outputs'] = self._set_aux_loss(outputs_class,
                                                 outputs_coord_list,
                                                 outputs_center_list,
-                                                outputs_iou_list, reference, outputs_vector)
+                                                outputs_iou_list, reference,
+                                                outputs_vector)
 
         # for encoder output
         if hs_enc is not None:
@@ -495,12 +502,18 @@ class DINOHead(nn.Module):
             # if self.use_vector:
             #     interm_vector = self.transformer.enc_out_vector_embed(hs_enc[-1])
             out['interm_outputs'] = {
-                'pred_logits': interm_class,
-                'pred_boxes': interm_coord,
-                'pred_centers': interm_center if self.use_centerness else None,
-                'pred_ious': interm_iou if self.use_iouaware else None,
-                'refpts': init_box_proposal[..., :2],
-                'pred_tokens': enc_token_class_unflat if self.use_tokenlabel else None,
+                'pred_logits':
+                interm_class,
+                'pred_boxes':
+                interm_coord,
+                'pred_centers':
+                interm_center if self.use_centerness else None,
+                'pred_ious':
+                interm_iou if self.use_iouaware else None,
+                'refpts':
+                init_box_proposal[..., :2],
+                'pred_tokens':
+                enc_token_class_unflat if self.use_tokenlabel else None,
                 # 'pred_vectors': interm_vector if self.use_vector else None,
             }
 
@@ -530,7 +543,8 @@ class DINOHead(nn.Module):
             outputs_iou[i] if outputs_iou is not None else None,
             'refpts':
             reference[i],
-            'pred_vectors': outputs_vector[i] if outputs_vector is not None else None
+            'pred_vectors':
+            outputs_vector[i] if outputs_vector is not None else None
         } for i, (a,
                   b) in enumerate(zip(outputs_class[:-1], outputs_coord[:-1]))]
 
@@ -569,8 +583,14 @@ class DINOHead(nn.Module):
             for gt_label, gt_bbox in zip(gt_labels, gt_bboxes):
                 targets.append({'labels': gt_label, 'boxes': gt_bbox})
         else:
-            for gt_label, gt_bbox, gt_mask, xyxy_bbox in zip(gt_labels, gt_bboxes, gt_masks, xyxy_bboxes):
-                targets.append({'labels': gt_label, 'boxes': gt_bbox, 'masks': gt_mask, 'xyxy_boxes': xyxy_bbox})
+            for gt_label, gt_bbox, gt_mask, xyxy_bbox in zip(
+                    gt_labels, gt_bboxes, gt_masks, xyxy_bboxes):
+                targets.append({
+                    'labels': gt_label,
+                    'boxes': gt_bbox,
+                    'masks': gt_mask,
+                    'xyxy_boxes': xyxy_bbox
+                })
 
         query_embed, tgt, attn_mask, dn_meta = self.prepare(
             x, targets=targets, mode='train')
@@ -593,10 +613,15 @@ class DINOHead(nn.Module):
             torch.distributed.all_reduce(num_boxes)
         num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
 
-        losses = self.criterion(outputs, targets, num_boxes=num_boxes)
+        losses = self.criterion(
+            outputs, targets, num_boxes=num_boxes, img_metas=img_metas)
         losses.update(
-            self.dn_criterion(outputs, targets, len(outputs['aux_outputs']),
-                              num_boxes))
+            self.dn_criterion(
+                outputs,
+                targets,
+                len(outputs['aux_outputs']),
+                num_boxes,
+                img_metas=img_metas))
 
         return losses
 
