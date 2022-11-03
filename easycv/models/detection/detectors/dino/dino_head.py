@@ -429,7 +429,7 @@ class DINOHead(nn.Module):
             layer_outputs_unsig = (layer_delta_unsig +
                                    inverse_sigmoid(layer_ref_sig)).clamp(
                                        min=-11)
-            layer_outputs_unsig = layer_outputs_unsig.float().sigmoid()
+            layer_outputs_unsig = layer_outputs_unsig.sigmoid()
             outputs_coord_list.append(layer_outputs_unsig)
         outputs_coord_list = torch.stack(outputs_coord_list)
 

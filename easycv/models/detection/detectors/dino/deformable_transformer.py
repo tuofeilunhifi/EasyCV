@@ -452,8 +452,8 @@ class DeformableTransformer(nn.Module):
             refpoint_embed_ = refpoint_embed_undetach.detach()
             init_box_proposal = torch.gather(
                 output_proposals, 1,
-                topk_proposals.unsqueeze(-1).repeat(
-                    1, 1, 4)).float().sigmoid()  # sigmoid
+                topk_proposals.unsqueeze(-1).repeat(1, 1,
+                                                    4)).sigmoid()  # sigmoid
 
             # gather tgt
             tgt_undetach = torch.gather(
@@ -493,7 +493,7 @@ class DeformableTransformer(nn.Module):
                     self.num_queries, 1)  # 1, n_q*n_pat, d_model
                 tgt = tgt_embed + tgt_pat
 
-            init_box_proposal = refpoint_embed_.float().sigmoid()
+            init_box_proposal = refpoint_embed_.sigmoid()
 
         else:
             raise NotImplementedError('unknown two_stage_type {}'.format(
@@ -534,8 +534,7 @@ class DeformableTransformer(nn.Module):
                 init_box_proposal = output_proposals
             else:
                 hs_enc = tgt_undetach.unsqueeze(0)
-                ref_enc = refpoint_embed_undetach.float().sigmoid().unsqueeze(
-                    0)
+                ref_enc = refpoint_embed_undetach.sigmoid().unsqueeze(0)
         else:
             hs_enc = ref_enc = None
         #########################################################
@@ -846,7 +845,7 @@ class TransformerDecoder(nn.Module):
         output = tgt
 
         intermediate = []
-        reference_points = refpoints_unsigmoid.float().sigmoid()
+        reference_points = refpoints_unsigmoid.sigmoid()
         ref_points = [reference_points]
 
         for layer_id, layer in enumerate(self.layers):
@@ -885,7 +884,7 @@ class TransformerDecoder(nn.Module):
             # modulated HW attentions
             if not self.deformable_decoder and self.modulate_hw_attn:
                 refHW_cond = self.ref_anchor_head(
-                    output).float().sigmoid()  # nq, bs, 2
+                    output).sigmoid()  # nq, bs, 2
                 query_sine_embed[..., self.d_model // 2:] *= (
                     refHW_cond[..., 0] /
                     reference_points[..., 2]).unsqueeze(-1)
@@ -922,7 +921,7 @@ class TransformerDecoder(nn.Module):
                 delta_unsig = self.bbox_embed[layer_id](output)
                 outputs_unsig = (delta_unsig +
                                  reference_before_sigmoid).clamp(min=-11)
-                new_reference_points = outputs_unsig.float().sigmoid()
+                new_reference_points = outputs_unsig.sigmoid()
 
                 # select # ref points
                 if self.dec_layer_number is not None and layer_id != self.num_layers - 1:
