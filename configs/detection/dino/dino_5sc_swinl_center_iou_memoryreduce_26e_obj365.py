@@ -23,7 +23,7 @@ model = dict(
 optimizer_config = dict(update_interval=1)
 
 # learning policy
-lr_config = dict(policy='step', step=[26])
+lr_config = dict(policy='step', step=[24])
 
 total_epochs = 26
 

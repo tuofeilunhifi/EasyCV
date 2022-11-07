@@ -3,7 +3,7 @@ _base_ = [
     './dino_schedule_1x.py'
 ]
 
-data = dict(imgs_per_gpu=2)  # total 16 = 8(gpu_num) * 2(batch_size)
+data = dict(imgs_per_gpu=1)  # total 16 = 8(gpu_num) * 2(batch_size)
 
 # model settings
 model = dict(

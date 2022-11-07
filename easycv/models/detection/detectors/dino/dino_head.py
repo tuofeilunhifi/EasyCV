@@ -344,7 +344,7 @@ class DINOHead(nn.Module):
 
     def prepare(self, features, targets=None, mode='train'):
 
-        if self.dn_number > 0 or targets is not None:
+        if self.dn_number > 0 and targets is not None:
             input_query_label, input_query_bbox, attn_mask, dn_meta =\
                 prepare_for_cdn(dn_args=(targets, self.dn_number, self.dn_label_noise_ratio, self.dn_box_noise_scale), num_queries=self.num_queries, num_classes=self.num_classes,
                                 hidden_dim=self.embed_dims, label_enc=self.label_enc)
