@@ -1058,6 +1058,8 @@ class DeformableTransformerDecoderLayer(nn.Module):
             im2col_step=64,
             use_adaptivemixing=use_adaptivemixing)
         self.use_adaptivemixing = use_adaptivemixing
+        self.n_heads = n_heads
+        self.d_model = d_model
         if self.use_adaptivemixing:
             self.adaptivemixing = AdaptiveMixing(
                 in_dim=d_model,
