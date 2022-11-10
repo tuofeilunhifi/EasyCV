@@ -16,7 +16,7 @@ model = dict(
         weight_dict=dict(loss_ce=2, loss_center=2, loss_iouaware=2)))
 
 # learning policy
-lr_config = dict(policy='step', step=[15])
+lr_config = dict(policy='step', step=[8])
 
 total_epochs = 18
 

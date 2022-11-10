@@ -1209,9 +1209,18 @@ class DeformableTransformerDecoderLayer(nn.Module):
                 tgt_reference_points.transpose(0, 1).contiguous(),
                 memory.transpose(0, 1), memory_spatial_shapes,
                 memory_level_start_index, memory_key_padding_mask)
-            sampled_feature = self.sample(
-                memory.transpose(0, 1), memory_spatial_shapes,
-                sampling_locations)
+            # for amp
+            if memory.dtype == torch.float16:
+                # for mixed precision
+                sampled_feature = self.sample(
+                    memory.to(torch.float32).transpose(0, 1),
+                    memory_spatial_shapes,
+                    sampling_locations.to(torch.float32))
+                sampled_feature = sampled_feature.to(torch.float16)
+            else:
+                sampled_feature = self.sample(
+                    memory.transpose(0, 1), memory_spatial_shapes,
+                    sampling_locations)
             tgt2 = self.adaptivemixing(sampled_feature,
                                        tgt.transpose(0, 1)).transpose(0, 1)
         tgt = tgt + self.dropout1(tgt2)
