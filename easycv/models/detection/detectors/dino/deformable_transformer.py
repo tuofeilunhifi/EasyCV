@@ -923,6 +923,13 @@ class TransformerDecoder(nn.Module):
                                  reference_before_sigmoid).clamp(min=-11)
                 new_reference_points = outputs_unsig.sigmoid()
 
+                assert not torch.isnan(
+                    reference_before_sigmoid).any(), reference_before_sigmoid
+                assert not torch.isnan(delta_unsig).any(), delta_unsig
+                assert not torch.isnan(outputs_unsig).any(), outputs_unsig
+                assert not torch.isnan(
+                    new_reference_points).any(), new_reference_points
+
                 # select # ref points
                 if self.dec_layer_number is not None and layer_id != self.num_layers - 1:
                     nq_now = new_reference_points.shape[0]
@@ -1185,6 +1192,8 @@ class DeformableTransformerDecoderLayer(nn.Module):
             Tensor] = None,  # mask used for self-attention
             cross_attn_mask: Optional[
                 Tensor] = None,  # mask used for cross-attention
+            img_metas: Optional[
+                Tensor] = None,  # mask used for cross-attention
     ):
         # cross attention
         if self.key_aware_type is not None:
@@ -1209,26 +1218,23 @@ class DeformableTransformerDecoderLayer(nn.Module):
                 tgt_reference_points.transpose(0, 1).contiguous(),
                 memory.transpose(0, 1), memory_spatial_shapes,
                 memory_level_start_index, memory_key_padding_mask)
-            # for amp
-            if memory.dtype == torch.float16:
-                # for mixed precision
-                sampled_feature = self.sample(
-                    memory.to(torch.float32).transpose(0, 1),
-                    memory_spatial_shapes,
-                    sampling_locations.to(torch.float32))
-                sampled_feature = sampled_feature.to(torch.float16)
-            else:
-                sampled_feature = self.sample(
-                    memory.transpose(0, 1), memory_spatial_shapes,
-                    sampling_locations)
+            assert not torch.isnan(
+                sampling_locations).any(), sampling_locations
+            sampled_feature = self.sample(
+                memory.transpose(0, 1), memory_spatial_shapes,
+                sampling_locations)
             tgt2 = self.adaptivemixing(sampled_feature,
                                        tgt.transpose(0, 1)).transpose(0, 1)
+            assert not torch.isnan(tgt2).any(), tgt2
+            assert not torch.isnan(tgt).any(), tgt
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
 
         return tgt
 
     def sample(self, value, value_spatial_shapes, sampling_locations):
+        value, sampling_locations = value.to(
+            torch.float32), sampling_locations.to(torch.float32)
         N, Len_in, _ = value.shape
         value = value.view(N, Len_in, self.n_heads,
                            self.d_model // self.n_heads)
@@ -1293,13 +1299,12 @@ class DeformableTransformerDecoderLayer(nn.Module):
             if funcname == 'ffn':
                 tgt = self.forward_ffn(tgt)
             elif funcname == 'ca':
-                tgt = self.forward_ca(tgt, tgt_query_pos, tgt_query_sine_embed,
-                                      tgt_key_padding_mask,
-                                      tgt_reference_points, memory,
-                                      memory_key_padding_mask,
-                                      memory_level_start_index,
-                                      memory_spatial_shapes, memory_pos,
-                                      self_attn_mask, cross_attn_mask)
+                tgt = self.forward_ca(
+                    tgt, tgt_query_pos, tgt_query_sine_embed,
+                    tgt_key_padding_mask, tgt_reference_points, memory,
+                    memory_key_padding_mask, memory_level_start_index,
+                    memory_spatial_shapes, memory_pos, self_attn_mask,
+                    cross_attn_mask, img_metas)
             elif funcname == 'sa':
                 tgt = self.forward_sa(
                     tgt, tgt_query_pos, tgt_query_sine_embed,
@@ -1347,6 +1352,9 @@ class AdaptiveMixing(nn.Module):
         self.parameter_generator = nn.Sequential(
             nn.Linear(self.query_dim, self.n_groups * self.total_parameters), )
 
+        # self.norm1 = nn.LayerNorm([self.in_points, self.eff_out_dim])
+        # self.norm2 = nn.LayerNorm([self.out_points, self.eff_out_dim])
+
         self.out_proj = nn.Linear(
             self.eff_out_dim * self.out_points * self.n_groups,
             self.query_dim,
@@ -1360,50 +1368,84 @@ class AdaptiveMixing(nn.Module):
     def init_weights(self):
         nn.init.zeros_(self.parameter_generator[-1].weight)
 
-    def forward(self, x, query):
+    def forward(self, x, query, img_metas=None):
+        x, query = x.to(torch.float32), query.to(torch.float32)
+        assert x.dtype == torch.float32 and query.dtype == torch.float32, (
+            x.dtype, query.dtype)
 
         B, N, g, P, C = x.size()
         # batch, num_query, group, point, channel
         G = self.n_groups
-        assert g == G
-        # assert C*g == self.in_dim
 
         # query: B, N, C
         # x: B, N, G, Px, Cx
         '''generate mixing parameters'''
-        params = self.parameter_generator(query)
+        params = self.parameter_generator(query).to(torch.float32)
         params = params.reshape(B * N, G, -1)
 
         out = x.reshape(B * N, G, P, C)
 
+        assert params.dtype == torch.float32 and out.dtype == torch.float32, (
+            params.dtype, out.dtype)
+
         M, S = params.split([self.m_parameters, self.s_parameters], 2)
         '''you can choose one implementation below'''
-        if False:
+        if True:
             out = out.reshape(B * N * G, P, C)
 
             M = M.reshape(B * N * G, self.eff_in_dim, self.eff_out_dim)
             S = S.reshape(B * N * G, self.out_points, self.in_points)
             '''adaptive channel mixing'''
+            assert not torch.isnan(out).any(), (torch.max(out), torch.min(out))
             out = torch.bmm(out, M)
+            assert not torch.isnan(M).any(), (torch.max(M), torch.min(M))
+            assert not torch.isnan(out).any(), (torch.max(out), torch.min(out))
             out = F.layer_norm(out, [out.size(-2), out.size(-1)])
+            assert not torch.isnan(out).any(), (torch.max(out), torch.min(out))
             out = self.act(out)
+            assert not torch.isnan(out).any(), (torch.max(out), torch.min(out))
             '''adaptive spatial mixing'''
             out = torch.bmm(S, out)  # implicitly transpose and matmul
+            assert not torch.isnan(S).any(), (torch.max(S), torch.min(S))
+            assert not torch.isnan(out).any(), (torch.max(out), torch.min(out))
             out = F.layer_norm(out, [out.size(-2), out.size(-1)])
+            assert not torch.isnan(out).any(), (torch.max(out), torch.min(out))
             out = self.act(out)
+            assert not torch.isnan(out).any(), (torch.max(out), torch.min(out))
         else:
             M = M.reshape(B * N, G, self.eff_in_dim, self.eff_out_dim)
             S = S.reshape(B * N, G, self.out_points, self.in_points)
             '''adaptive channel mixing'''
-            out = torch.matmul(out, M)
-            out = F.layer_norm(out, [out.size(-2), out.size(-1)])
-            out = self.act(out)
+            assert out.dtype == torch.float32 and M.dtype == torch.float32, (
+                out.dtype, M.dtype)
+            out = torch.matmul(out, M).to(torch.float32)
+            assert not torch.isnan(out).any(), out
+            assert out.dtype == torch.float32, out.dtype
+            out = self.norm1(out).to(torch.float32)
+            assert out.dtype == torch.float32, out.dtype
+            assert not torch.isnan(out).any(), out
+            out = self.act(out).to(torch.float32)
+            assert out.dtype == torch.float32, out.dtype
+            assert not torch.isnan(out).any(), out
             '''adaptive spatial mixing'''
-            out = torch.matmul(S, out)  # implicitly transpose and matmul
-            out = F.layer_norm(out, [out.size(-2), out.size(-1)])
-            out = self.act(out)
+            assert out.dtype == torch.float32 and S.dtype == torch.float32, (
+                out.dtype, S.dtype)
+            out = torch.matmul(S, out).to(
+                torch.float32)  # implicitly transpose and matmul
+            assert not torch.isnan(out).any(), out
+            assert out.dtype == torch.float32, out.dtype
+            out = self.norm2(out).to(torch.float32)
+            assert out.dtype == torch.float32, out.dtype
+            assert not torch.isnan(out).any(), out
+            out = self.act(out).to(torch.float32)
+            assert out.dtype == torch.float32, out.dtype
+            assert not torch.isnan(out).any(), out
         '''linear transfomation to query dim'''
         out = out.reshape(B, N, -1)
         out = self.out_proj(out)
+
+        assert not torch.isnan(query).any(), query
+        assert not torch.isnan(params).any(), params
+        assert not torch.isnan(out).any(), out
 
         return out
