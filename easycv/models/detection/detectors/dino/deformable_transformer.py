@@ -199,8 +199,8 @@ class DeformableTransformer(nn.Module):
         ], 'unknown param {} of two_stage_type'.format(two_stage_type)
         if two_stage_type == 'standard':
             # anchor selection at the output of encoder
-            self.enc_output = nn.Linear(d_model, d_model)
-            self.enc_output_norm = nn.LayerNorm(d_model)
+            self.enc_output = nn.Linear(d_model // 2, d_model // 2)
+            self.enc_output_norm = nn.LayerNorm(d_model // 2)
 
             if two_stage_pat_embed > 0:
                 self.pat_embed_for_2stage = nn.Parameter(
@@ -855,9 +855,11 @@ class TransformerDecoder(nn.Module):
 
             # iter update
             if self.bbox_embed is not None:
+                output_split = output.split(
+                    [self.d_model // 2, self.d_model // 2], dim=-1)
 
                 reference_before_sigmoid = inverse_sigmoid(reference_points)
-                delta_unsig = self.bbox_embed[layer_id](output)
+                delta_unsig = self.bbox_embed[layer_id](output_split[0])
                 outputs_unsig = delta_unsig + reference_before_sigmoid
                 new_reference_points = outputs_unsig.sigmoid()
 

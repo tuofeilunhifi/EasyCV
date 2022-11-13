@@ -152,14 +152,20 @@ class DINOHead(nn.Module):
         self.dec_pred_class_embed_share = dec_pred_class_embed_share
         self.dec_pred_bbox_embed_share = dec_pred_bbox_embed_share
         # prepare class & box embed
-        _class_embed = nn.Linear(embed_dims, num_classes)
-        _bbox_embed = MLP(embed_dims, embed_dims, 4, 3)
+        _class_embed = nn.Linear(embed_dims // 2, num_classes)
+        _bbox_embed = MLP(embed_dims // 2, embed_dims // 2, 4, 3)
+        enc_class_embed = nn.Linear(embed_dims, num_classes)
+        enc_bbox_embed = MLP(embed_dims, embed_dims, 4, 3)
         # init the two embed layers
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         _class_embed.bias.data = torch.ones(self.num_classes) * bias_value
         nn.init.constant_(_bbox_embed.layers[-1].weight.data, 0)
         nn.init.constant_(_bbox_embed.layers[-1].bias.data, 0)
+
+        enc_class_embed.bias.data = torch.ones(self.num_classes) * bias_value
+        nn.init.constant_(enc_bbox_embed.layers[-1].weight.data, 0)
+        nn.init.constant_(enc_bbox_embed.layers[-1].bias.data, 0)
 
         if dec_pred_bbox_embed_share:
             box_embed_layerlist = [
@@ -196,14 +202,14 @@ class DINOHead(nn.Module):
                 self.transformer.enc_out_bbox_embed = _bbox_embed
             else:
                 self.transformer.enc_out_bbox_embed = copy.deepcopy(
-                    _bbox_embed)
+                    enc_bbox_embed)
 
             if two_stage_class_embed_share:
                 assert dec_pred_class_embed_share and dec_pred_bbox_embed_share
                 self.transformer.enc_out_class_embed = _class_embed
             else:
                 self.transformer.enc_out_class_embed = copy.deepcopy(
-                    _class_embed)
+                    enc_class_embed)
 
             self.refpoint_embed = None
             if self.two_stage_add_query_num > 0:
@@ -343,6 +349,8 @@ class DINOHead(nn.Module):
         outputs_coord_list = []
         for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(
                 zip(reference[:-1], self.bbox_embed, hs)):
+            layer_hs = layer_hs.split(
+                [self.embed_dims // 2, self.embed_dims // 2], dim=-1)[0]
             layer_delta_unsig = layer_bbox_embed(layer_hs)
             layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(
                 layer_ref_sig)
@@ -352,7 +360,9 @@ class DINOHead(nn.Module):
 
         # outputs_class = self.class_embed(hs)
         outputs_class = torch.stack([
-            layer_cls_embed(layer_hs)
+            layer_cls_embed(
+                layer_hs.split([self.embed_dims // 2, self.embed_dims // 2],
+                               dim=-1)[1])
             for layer_cls_embed, layer_hs in zip(self.class_embed, hs)
         ])
         if self.dn_number > 0 and dn_meta is not None:
