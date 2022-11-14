@@ -168,23 +168,30 @@ class DINOHead(nn.Module):
         self.dec_pred_class_embed_share = dec_pred_class_embed_share
         self.dec_pred_bbox_embed_share = dec_pred_bbox_embed_share
         # prepare class & box embed
-        _class_embed = nn.Linear(embed_dims, num_classes)
-        _bbox_embed = MLP(embed_dims, embed_dims, 4, 3)
+        _class_embed = nn.Linear(embed_dims // 2, num_classes)
+        _bbox_embed = MLP(embed_dims // 2, embed_dims // 2, 4, 3)
+        enc_class_embed = nn.Linear(embed_dims, num_classes)
+        enc_bbox_embed = MLP(embed_dims, embed_dims, 4, 3)
         # init the two embed layers
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         _class_embed.bias.data = torch.ones(self.num_classes) * bias_value
         nn.init.constant_(_bbox_embed.layers[-1].weight.data, 0)
         nn.init.constant_(_bbox_embed.layers[-1].bias.data, 0)
+        enc_class_embed.bias.data = torch.ones(self.num_classes) * bias_value
+        nn.init.constant_(enc_bbox_embed.layers[-1].weight.data, 0)
+        nn.init.constant_(enc_bbox_embed.layers[-1].bias.data, 0)
 
         # fcos centerness & iou-aware & tokenlabel
         self.use_centerness = use_centerness
         self.use_iouaware = use_iouaware
         self.use_tokenlabel = use_tokenlabel
         if self.use_centerness:
-            _center_embed = MLP(embed_dims, embed_dims, 1, 3)
+            _center_embed = MLP(embed_dims // 2, embed_dims // 2, 1, 3)
+            enc_center_embed = MLP(embed_dims, embed_dims, 1, 3)
         if self.use_iouaware:
-            _iou_embed = MLP(embed_dims, embed_dims, 1, 3)
+            _iou_embed = MLP(embed_dims // 2, embed_dims // 2, 1, 3)
+            enc_iou_embed = MLP(embed_dims, embed_dims, 1, 3)
 
         if dec_pred_bbox_embed_share:
             box_embed_layerlist = [
@@ -262,31 +269,31 @@ class DINOHead(nn.Module):
         if two_stage_type != 'no':
             if two_stage_bbox_embed_share:
                 assert dec_pred_class_embed_share and dec_pred_bbox_embed_share
-                self.transformer.enc_out_bbox_embed = _bbox_embed
+                self.transformer.enc_out_bbox_embed = enc_bbox_embed
                 if self.use_centerness:
-                    self.transformer.enc_out_center_embed = _center_embed
+                    self.transformer.enc_out_center_embed = enc_center_embed
                 if self.use_iouaware:
-                    self.transformer.enc_out_iou_embed = _iou_embed
+                    self.transformer.enc_out_iou_embed = enc_iou_embed
                 # if self.use_vector:
                 #     self.transformer.enc_out_vector_embed = _vector_embed
             else:
                 self.transformer.enc_out_bbox_embed = copy.deepcopy(
-                    _bbox_embed)
+                    enc_bbox_embed)
                 if self.use_centerness:
                     self.transformer.enc_out_center_embed = copy.deepcopy(
-                        _center_embed)
+                        enc_center_embed)
                 if self.use_iouaware:
                     self.transformer.enc_out_iou_embed = copy.deepcopy(
-                        _iou_embed)
+                        enc_iou_embed)
                 # if self.use_vector:
                 #     self.transformer.enc_out_vector_embed = copy.deepcopy(_vector_embed)
 
             if two_stage_class_embed_share:
                 assert dec_pred_class_embed_share and dec_pred_bbox_embed_share
-                self.transformer.enc_out_class_embed = _class_embed
+                self.transformer.enc_out_class_embed = enc_class_embed
             else:
                 self.transformer.enc_out_class_embed = copy.deepcopy(
-                    _class_embed)
+                    enc_class_embed)
 
             self.refpoint_embed = None
             if self.two_stage_add_query_num > 0:
@@ -425,6 +432,8 @@ class DINOHead(nn.Module):
         outputs_coord_list = []
         for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(
                 zip(reference[:-1], self.bbox_embed, hs)):
+            layer_hs = layer_hs.split(
+                [self.embed_dims // 2, self.embed_dims // 2], dim=-1)[0]
             layer_delta_unsig = layer_bbox_embed(layer_hs)
             layer_outputs_unsig = (layer_delta_unsig +
                                    inverse_sigmoid(layer_ref_sig)).clamp(
@@ -435,21 +444,29 @@ class DINOHead(nn.Module):
 
         # outputs_class = self.class_embed(hs)
         outputs_class = torch.stack([
-            layer_cls_embed(layer_hs)
+            layer_cls_embed(
+                layer_hs.split([self.embed_dims // 2, self.embed_dims // 2],
+                               dim=-1)[1])
             for layer_cls_embed, layer_hs in zip(self.class_embed, hs)
         ])
 
         outputs_center_list = None
         if self.use_centerness:
             outputs_center_list = torch.stack([
-                layer_center_embed(layer_hs)
+                layer_center_embed(
+                    layer_hs.split(
+                        [self.embed_dims // 2, self.embed_dims // 2],
+                        dim=-1)[0])
                 for layer_center_embed, layer_hs in zip(self.center_embed, hs)
             ])
 
         outputs_iou_list = None
         if self.use_iouaware:
             outputs_iou_list = torch.stack([
-                layer_iou_embed(layer_hs)
+                layer_iou_embed(
+                    layer_hs.split(
+                        [self.embed_dims // 2, self.embed_dims // 2],
+                        dim=-1)[0])
                 for layer_iou_embed, layer_hs in zip(self.iou_embed, hs)
             ])
 
@@ -457,7 +474,10 @@ class DINOHead(nn.Module):
         outputs_vector = None
         if self.use_vector:
             outputs_vector = torch.stack([
-                layer_vector_embed(layer_hs)
+                layer_vector_embed(
+                    layer_hs.split(
+                        [self.embed_dims // 2, self.embed_dims // 2],
+                        dim=-1)[1])
                 for layer_vector_embed, layer_hs in zip(self.vector_embed, hs)
             ])
 

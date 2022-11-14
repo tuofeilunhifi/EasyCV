@@ -916,9 +916,10 @@ class TransformerDecoder(nn.Module):
 
             # iter update
             if self.bbox_embed is not None:
-
                 reference_before_sigmoid = inverse_sigmoid(reference_points)
-                delta_unsig = self.bbox_embed[layer_id](output)
+                delta_unsig = self.bbox_embed[layer_id](
+                    output.split([self.d_model // 2, self.d_model // 2],
+                                 dim=-1)[0])
                 outputs_unsig = (delta_unsig +
                                  reference_before_sigmoid).clamp(min=-11)
                 new_reference_points = outputs_unsig.sigmoid()
