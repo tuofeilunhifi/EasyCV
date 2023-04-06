@@ -92,6 +92,9 @@ IMAGENET_LABEL_TXT = os.path.join(
 CLS_DATA_NPY_OSS = os.path.join(BASE_OSS_PATH, 'data/classification/npy/')
 SMALL_IMAGENET_TFRECORD_OSS = os.path.join(
     BASE_OSS_PATH, 'data/classification/small_imagenet_tfrecord/')
+SMALL_MARKET1501 = os.path.join(BASE_LOCAL_PATH,
+                                'data/tracking/small_Market1501')
+TEST_MOT_DIR = os.path.join(BASE_LOCAL_PATH, 'data/tracking/mot20_1.mp4')
 
 IO_DATA_TXTX_OSS = os.path.join(BASE_OSS_PATH, 'data/io_test_dir/txts/')
 IO_DATA_MULTI_DIRS_OSS = os.path.join(BASE_OSS_PATH,
@@ -159,6 +162,8 @@ SEG_DATA_SMALL_COCO_STUFF_10K = os.path.join(
     BASE_LOCAL_PATH, 'data/segmentation/small_coco_stuff/small_coco_stuff10k')
 SEG_DATA_SAMLL_COCO_STUFF_164K = os.path.join(
     BASE_LOCAL_PATH, 'data/segmentation/small_coco_stuff/small_coco_stuff164k')
+SEG_DATA_SAMLL_CITYSCAPES = os.path.join(BASE_LOCAL_PATH,
+                                         'data/segmentation/small_cityscapes')
 
 # OCR data
 SMALL_OCR_CLS_DATA = os.path.join(BASE_LOCAL_PATH, 'data/ocr/small_ocr_cls')

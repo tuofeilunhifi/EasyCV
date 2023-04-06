@@ -29,7 +29,7 @@ class SegmentationPredictor(PredictorV2):
 
     def __init__(self,
                  model_path,
-                 config_file,
+                 config_file=None,
                  batch_size=1,
                  device=None,
                  save_results=False,
@@ -54,7 +54,7 @@ class SegmentationPredictor(PredictorV2):
             **kwargs)
 
         self.CLASSES = self.cfg.CLASSES
-        self.PALETTE = self.cfg.PALETTE
+        self.PALETTE = self.cfg.get('PALETTE', None)
 
     def show_result(self,
                     img,
@@ -90,7 +90,8 @@ class SegmentationPredictor(PredictorV2):
 
         img = mmcv.imread(img)
         img = img.copy()
-        seg = result[0]
+        # seg = result[0]
+        seg = result
         if palette is None:
             if self.PALETTE is None:
                 # Get random state before set seed,
@@ -228,9 +229,11 @@ class Mask2formerPredictor(SegmentationPredictor):
             outputs = self.model.forward(**inputs, mode='test', encode=False)
         return outputs
 
-    def show_panoptic(self, img, masks, labels):
+    def show_panoptic(self, img, masks, labels_ids, **kwargs):
         palette = np.asarray(self.cfg.PALETTE)
-        palette = palette[labels % 1000]
+        # ids have already convert to label in process_single function
+        # palette = palette[labels_ids % 1000]
+        palette = palette[labels_ids]
         panoptic_result = draw_masks(img, masks, palette)
         return panoptic_result
 

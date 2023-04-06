@@ -110,6 +110,7 @@ class DetSourceRaw(DetSourceBase):
         ]
 
         self.label_files = []
+        self.img_files_effec = []
         for img_path in self.img_files:
             img_name = os.path.splitext(os.path.basename(img_path))[0]
             find_label_path = False
@@ -119,18 +120,18 @@ class DetSourceRaw(DetSourceBase):
                 if io.exists(lable_path):
                     find_label_path = True
                     self.label_files.append(lable_path)
+                    self.img_files_effec.append(img_path)
                     break
             if not find_label_path:
                 logging.warning(
                     'Not find label file %s for img: %s, skip the sample!' %
                     (lable_path, img_path))
-                self.img_files.remove(img_path)
 
-        assert len(self.img_files) == len(self.label_files)
-        assert len(
-            self.img_files) > 0, 'No samples found in %s' % self.img_root_path
+        assert len(self.img_files_effec) == len(self.label_files)
+        assert len(self.img_files_effec
+                   ) > 0, 'No samples found in %s' % self.img_root_path
 
-        return list(zip(self.img_files, self.label_files))
+        return list(zip(self.img_files_effec, self.label_files))
 
     def post_process_fn(self, result_dict):
         result_dict = super(DetSourceRaw, self).post_process_fn(result_dict)
@@ -138,3 +139,21 @@ class DetSourceRaw(DetSourceBase):
         result_dict['gt_bboxes'] = batched_cxcywh2xyxy_with_shape(
             result_dict['gt_bboxes'], shape=result_dict['img_shape'][:2])
         return result_dict
+
+    def get_ann_info(self, idx):
+        """
+        Get raw annotation info, include bounding boxes, labels and so on.
+        `bboxes` format is as [x1, y1, x2, y2] without normalization.
+        """
+        sample_info = self.samples_list[idx]
+        result_dict = self[idx]
+        groundtruth_is_crowd = sample_info.get('groundtruth_is_crowd', None)
+        if groundtruth_is_crowd is None:
+            groundtruth_is_crowd = np.zeros_like(sample_info['gt_labels'])
+
+        annotations = {
+            'bboxes': result_dict['gt_bboxes'],
+            'labels': sample_info['gt_labels'],
+            'groundtruth_is_crowd': groundtruth_is_crowd
+        }
+        return annotations
